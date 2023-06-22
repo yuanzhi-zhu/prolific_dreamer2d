@@ -135,17 +135,27 @@ def loss_weights(betas, args):
     return weights
 
 
-def predict_noise0_diffuser(unet, latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None):
+def predict_noise0_diffuser(unet, latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None, lora_v=False):
     batch_size = latents.shape[0]
     latent_model_input = torch.cat([latents] * 2)
     latent_model_input = scheduler.scale_model_input(latent_model_input, t)
 
+    if lora_v:
+        # https://github.com/threestudio-project/threestudio/blob/77de7d75c34e29a492f2dda498c65d2fd4a767ff/threestudio/models/guidance/stable_diffusion_vsd_guidance.py#L512
+        alphas_cumprod = scheduler.alphas_cumprod.to(
+            device=latents.device, dtype=latents.dtype
+        )
+        alpha_t = alphas_cumprod[t] ** 0.5
+        sigma_t = (1 - alphas_cumprod[t]) ** 0.5
     if guidance_scale == 1.:
         noise_pred = unet(latents, t, encoder_hidden_states=text_embeddings[batch_size:], cross_attention_kwargs=cross_attention_kwargs).sample
-        # noise_pred = noise_pred_phi.detach()
+        if lora_v:
+            noise_pred = latents * sigma_t.view(-1, 1, 1, 1) + noise_pred * alpha_t.view(-1, 1, 1, 1)
     else:
         # predict the noise residual
         noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings, cross_attention_kwargs=cross_attention_kwargs).sample
+        if lora_v:
+            noise_pred = latent_model_input * torch.cat([sigma_t] * 2, dim=0).view(-1, 1, 1, 1) + noise_pred * torch.cat([alpha_t] * 2, dim=0).view(-1, 1, 1, 1)
         # perform guidance
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -203,9 +213,9 @@ def predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, g
 
 def sds_vsd_grad_diffuser(unet, latents, noise, text_embeddings, t, unet_phi=None, guidance_scale=7.5, \
                         grad_scale=1, cfg_phi=1., generation_mode='sds', phi_model='lora', \
-                            cross_attention_kwargs={}, multisteps=1, scheduler=None):
+                            cross_attention_kwargs={}, multisteps=1, scheduler=None, lora_v=False):
     # ref to https://github.com/ashawkey/stable-dreamfusion/blob/main/guidance/sd_utils.py#L114
-    unet_cross_attention_kwargs = {'scale': 0} if (generation_mode == 'vsd' and phi_model == 'lora') else {}
+    unet_cross_attention_kwargs = {'scale': 0} if (generation_mode == 'vsd' and phi_model == 'lora' and not lora_v) else {}
     with torch.no_grad():
         # predict the noise residual with unet
         # set cross_attention_kwargs={'scale': 0} to use the pre-trained model
@@ -220,7 +230,7 @@ def sds_vsd_grad_diffuser(unet, latents, noise, text_embeddings, t, unet_phi=Non
         noise_pred_phi = noise
     elif generation_mode == 'vsd':
         with torch.no_grad():
-            noise_pred_phi = predict_noise0_diffuser(unet_phi, latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler)
+            noise_pred_phi = predict_noise0_diffuser(unet_phi, latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=lora_v)
         # VSD
         grad = grad_scale * (noise_pred - noise_pred_phi.detach())
 
@@ -230,12 +240,17 @@ def sds_vsd_grad_diffuser(unet, latents, noise, text_embeddings, t, unet_phi=Non
 
     return loss, noise_pred.detach().clone(), noise_pred_phi.detach().clone()
 
-def phi_vsd_grad_diffuser(unet_phi, latents, noise, text_embeddings, t, cfg_phi=1., grad_scale=1, cross_attention_kwargs={}, scheduler=None):
+def phi_vsd_grad_diffuser(unet_phi, latents, noise, text_embeddings, t, cfg_phi=1., grad_scale=1, cross_attention_kwargs={}, scheduler=None, lora_v=False):
     loss_fn = nn.MSELoss()
     # ref to https://github.com/ashawkey/stable-dreamfusion/blob/main/guidance/sd_utils.py#L114
     # predict the noise residual with unet
+    clean_latents = scheduler.step(noise, t, latents).pred_original_sample
     noise_pred = predict_noise0_diffuser(unet_phi, latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler)
-    loss = loss_fn(noise_pred, noise)
+    if lora_v:
+        target = scheduler.get_velocity(clean_latents, noise, t)
+    else:
+        target = noise
+    loss = loss_fn(noise_pred, target)
     loss *= grad_scale
 
     return loss

@@ -71,6 +71,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--phi_lr', type=float, default=0.0001, help='Learning rate for phi model')
     parser.add_argument('--phi_model', type=str, default='lora', help='models servered as epsilon_phi')
     parser.add_argument('--use_t_phi', type=str2bool, default=False, help='use different t for phi finetuning')
+    parser.add_argument('--lora_vprediction', type=str2bool, default=False, help='use v prediction model for lora')
     parser.add_argument('--lora_scale', type=float, default=1.0, help='lora_scale of the unet cross attn')
     parser.add_argument('--use_scheduler', default=False, type=str2bool, help='use_scheduler for lr')
     parser.add_argument('--lr_scheduler_start_factor', type=float, default=1/3, help='Start factor for learning rate scheduler')
@@ -134,8 +135,8 @@ def main():
     # 1. Load the autoencoder model which will be used to decode the latents into image space. 
     vae = AutoencoderKL.from_pretrained(args.model_path, subfolder="vae", torch_dtype=dtype)
     # 2. Load the tokenizer and text encoder to tokenize and encode the text. 
-    tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=dtype)
-    text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=dtype)
+    tokenizer = CLIPTokenizer.from_pretrained(args.model_path, subfolder="tokenizer", torch_dtype=dtype)
+    text_encoder = CLIPTextModel.from_pretrained(args.model_path, subfolder="text_encoder", torch_dtype=dtype)
     # 3. The UNet model for generating the latents.
     unet = UNet2DConditionModel.from_pretrained(args.model_path, subfolder="unet", torch_dtype=dtype)
     # 4. Scheduler
@@ -143,6 +144,8 @@ def main():
 
     vae = vae.to(device)
     text_encoder = text_encoder.to(device)
+    if args.dtype == 'half':
+        unet = unet.half()
     unet = unet.to(device)
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -154,8 +157,17 @@ def main():
     
     if args.generation_mode == 'vsd':
         if args.phi_model == 'lora':
-            ### unet_phi is the same instance as unet that has been modified in-place
-            unet_phi, unet_lora_layers = extract_lora_diffusers(unet, device)
+            if args.lora_vprediction:
+                assert args.model_path == 'stabilityai/stable-diffusion-2-1-base'
+                vae_phi = AutoencoderKL.from_pretrained('stabilityai/stable-diffusion-2-1', subfolder="vae", torch_dtype=dtype).to(device)
+                unet_phi = UNet2DConditionModel.from_pretrained('stabilityai/stable-diffusion-2-1', subfolder="unet", torch_dtype=dtype).to(device)
+                vae_phi.requires_grad_(False)
+                vae_phi.requires_grad_(False)
+                unet_phi, unet_lora_layers = extract_lora_diffusers(unet_phi, device)
+            else:
+                vae_phi = vae
+                ### unet_phi is the same instance as unet that has been modified in-place
+                unet_phi, unet_lora_layers = extract_lora_diffusers(unet, device)
             phi_params = list(unet_lora_layers.parameters())
             if args.load_phi_model_path:
                 unet_phi.load_attn_procs(args.load_phi_model_path)
@@ -252,10 +264,12 @@ def main():
             phi_params = list(unet_lora_layers.parameters())
             unet_phi.load_attn_procs(args.load_phi_model_path)
             unet = unet_phi.to(device)
+        step = 0
         for t in tqdm(scheduler.timesteps):
             # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
             latent_model_input = torch.cat([latents] * 2)
             latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+            latent_noisy = latents
             # predict the noise residual
             with torch.no_grad():
                 noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
@@ -264,6 +278,22 @@ def main():
             noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_text - noise_pred_uncond)
             # compute the previous noisy sample x_t -> x_t-1
             latents = scheduler.step(noise_pred, t, latents).prev_sample
+            ######## Evaluation and log metric #########
+            if args.log_steps and (step % args.log_steps == 0 or step == (args.num_steps-1)):
+                # save current img_tensor
+                # scale and decode the image latents with vae
+                tmp_latents = 1 / 0.18215 * latents.clone().detach()
+                if args.save_x0:
+                    # compute the predicted clean sample x_0
+                    pred_latents = scheduler.step(noise_pred, t, latent_noisy).pred_original_sample.to(dtype).clone().detach()
+                with torch.no_grad():
+                    image_ = vae.decode(tmp_latents).sample.to(torch.float32)
+                    if args.save_x0:
+                        image_x0 = vae.decode(pred_latents / 0.18215).sample.to(torch.float32)
+                        image = torch.cat((image_,image_x0), dim=2)
+                if args.log_progress:
+                    image_progress.append((image/2+0.5).clamp(0, 1))
+            step += 1
     ### sds text to image generation
     elif args.generation_mode in ['sds', 'vsd']:
         cross_attention_kwargs = {'scale': args.lora_scale} if (args.generation_mode == 'vsd' and args.phi_model == 'lora') else {}
@@ -281,7 +311,7 @@ def main():
                                                     guidance_scale=args.guidance_scale, unet_phi=unet_phi, \
                                                         generation_mode=args.generation_mode, phi_model=args.phi_model, \
                                                             cross_attention_kwargs=cross_attention_kwargs, \
-                                                                multisteps=args.multisteps, scheduler=scheduler)
+                                                                multisteps=args.multisteps, scheduler=scheduler, lora_v=args.lora_vprediction)
             ## weighting
             loss *= loss_weight[int(t)]
             ## Compute gradients
@@ -305,7 +335,7 @@ def main():
                     t_phi = t
                     noise_phi = noise
                     noisy_latents_phi = noisy_latents
-                loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings, t_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler)
+                loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings, t_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=args.lora_vprediction)
                 loss_phi.backward()
                 phi_optimizer.step()
 
@@ -331,7 +361,7 @@ def main():
                     if args.save_x0:
                         image_x0 = vae.decode(pred_latents / 0.18215).sample.to(torch.float32)
                         if args.generation_mode == 'vsd':
-                            image_x0_phi = vae.decode(pred_latents_phi / 0.18215).sample.to(torch.float32)
+                            image_x0_phi = vae_phi.decode(pred_latents_phi / 0.18215).sample.to(torch.float32)
                             image = torch.cat((image_,image_x0,image_x0_phi), dim=2)
                         else:
                             image = torch.cat((image_,image_x0), dim=2)
@@ -349,7 +379,7 @@ def main():
                 logger.info(f'global free and total GPU memory: {round(global_free/1024**3,6)} GB, {round(total_gpu/1024**3,6)} GB')
                 first_iteration = False
 
-    if args.log_progress and args.generation_mode != 't2i' and args.batch_size == 1:
+    if args.log_progress and args.batch_size == 1:
         concatenated_images = torch.cat(image_progress, dim=0)
         save_image(concatenated_images, f'{args.work_dir}/{image_name}_prgressive.png')
     # scale and decode the image latents with vae
