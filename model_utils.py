@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.cuda.amp import custom_bwd, custom_fwd
 import numpy as np
+from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
 from diffusers.models.attention_processor import (
@@ -28,7 +29,7 @@ class SpecifyGradient(torch.autograd.Function):
         gt_grad = gt_grad * grad_scale
         return gt_grad, None
 
-def get_t_schedule(num_train_timesteps, args):
+def get_t_schedule(num_train_timesteps, args, loss_weight=None):
     # Create a list of time steps from 0 to num_train_timesteps
     ts = list(range(num_train_timesteps))
     # set ts to U[0.02,0.98] as least
@@ -81,6 +82,22 @@ def get_t_schedule(num_train_timesteps, args):
             selected_ts = np.random.choice(portion, args.num_steps//num_stages, replace=True).tolist()
             chosen_ts += selected_ts
     
+    elif 'dreamtime' in args.t_schedule:
+        # time schedule in dreamtime https://arxiv.org/abs//2306.12422
+        assert 'dreamtime' in args.loss_weight_type
+        loss_weight_sum = np.sum(loss_weight)
+        p = [wt / loss_weight_sum for wt in loss_weight]
+        N = args.num_steps
+        def t_i(t, i, p):
+            t = int(max(0, min(len(p)-1, t)))
+            return abs(sum(p[t:]) - i/N)
+        chosen_ts = []
+        for i in range(N):
+            # Initial guess for t
+            t0 = 999
+            selected_t = minimize(t_i, t0, args=(i, p), method='Nelder-Mead')
+            selected_t = max(0, int(selected_t.x))
+            chosen_ts.append(selected_t)
     else:
         raise ValueError(f"Unknown scheduling strategy: {args.t_schedule}")
 
@@ -99,6 +116,10 @@ def loss_weights(betas, args):
     sigma_ks = []
     SNRs = []
     rhos = []
+    m1 = 800
+    m2 = 500
+    s1 = 300
+    s2 = 100
     for i in range(num_train_timesteps):
         sigma_ks.append(reduced_alpha_cumprod[i])
         SNRs.append(1 / reduced_alpha_cumprod[i])
@@ -127,6 +148,13 @@ def loss_weights(betas, args):
                 return alphas_cumprod[t]
             elif args.loss_weight_type == 'sqrt_alphas_1m_alphas_cumprod':
                 return sqrt_alphas_cumprod[t] * sqrt_1m_alphas_cumprod[t]
+        elif 'dreamtime' in args.loss_weight_type:
+            if t > m1:
+                return np.exp(-(t - m1)**2 / (2 * s1**2))
+            elif t >= m2:
+                return 1
+            else:
+                return np.exp(-(t - m2)**2 / (2 * s2**2))
         else:
             raise NotImplementedError
     weights = []
@@ -247,7 +275,7 @@ def phi_vsd_grad_diffuser(unet_phi, latents, noise, text_embeddings, t, cfg_phi=
     clean_latents = scheduler.step(noise, t, latents).pred_original_sample
     noise_pred = predict_noise0_diffuser(unet_phi, latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler)
     if lora_v:
-        target = scheduler.get_velocity(clean_latents, noise, t)
+        target = scheduler.get_velocity(clean_latents.detach(), noise, t)
     else:
         target = noise
     loss = loss_fn(noise_pred, target)

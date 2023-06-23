@@ -14,6 +14,7 @@ from model_utils import (
             sds_vsd_grad_diffuser, 
             phi_vsd_grad_diffuser, 
             extract_lora_diffusers,
+            predict_noise0_diffuser,
             update_curve
 )
 import shutil
@@ -77,6 +78,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--lr_scheduler_start_factor', type=float, default=1/3, help='Start factor for learning rate scheduler')
     parser.add_argument('--lr_scheduler_iters', type=int, default=300, help='Iterations for learning rate scheduler')
     parser.add_argument('--loss_weight_type', type=str, default='none', help='type of loss weight')
+    parser.add_argument('--nerf_init', type=str2bool, default=False, help='initialize with diffusion models as mean predictor')
     args = parser.parse_args()
     # create working directory
     args.run_id = args.run_date + '_' + args.run_time
@@ -162,7 +164,6 @@ def main():
                 vae_phi = AutoencoderKL.from_pretrained('stabilityai/stable-diffusion-2-1', subfolder="vae", torch_dtype=dtype).to(device)
                 unet_phi = UNet2DConditionModel.from_pretrained('stabilityai/stable-diffusion-2-1', subfolder="unet", torch_dtype=dtype).to(device)
                 vae_phi.requires_grad_(False)
-                vae_phi.requires_grad_(False)
                 unet_phi, unet_lora_layers = extract_lora_diffusers(unet_phi, device)
             else:
                 vae_phi = vae
@@ -212,10 +213,6 @@ def main():
         uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]   
     text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
-    ### initialize latents
-    latents = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8))
-    latents = latents.to(device, dtype=dtype)
-
     ### weight loss
     num_train_timesteps = len(scheduler.betas)
     loss_weight = loss_weights(scheduler.betas, args)
@@ -225,6 +222,14 @@ def main():
         scheduler.set_timesteps(args.num_steps)
     else:
         scheduler.set_timesteps(num_train_timesteps)
+
+    ### initialize latents
+    latents = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8))
+    latents = latents.to(device, dtype=dtype)
+    if args.nerf_init:
+        with torch.no_grad():
+            noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings, t=999, guidance_scale=7.5, scheduler=scheduler)
+        latents = scheduler.step(noise_pred, 999, latents).pred_original_sample
     latents = latents * scheduler.init_noise_sigma
 
     #######################################################################################
@@ -254,7 +259,7 @@ def main():
     first_iteration = True
     logger.info("################# Metrics: ####################")
     ######## t schedule #########
-    chosen_ts = get_t_schedule(num_train_timesteps, args)
+    chosen_ts = get_t_schedule(num_train_timesteps, args, loss_weight)
     pbar = tqdm(chosen_ts)
     ### regular sd text to image generation
     if args.generation_mode == 't2i':
