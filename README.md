@@ -27,6 +27,22 @@ python prolific_dreamer2d.py \
         --height 512 --width 512 --batch_size 1 --guidance_scale 7.5 \
         --log_progress true --save_x0 true --save_phi_model true \
 ```
+#!/bin/sh
+
+#### VSD command line multiple particles
+```python
+python prolific_dreamer2d.py \
+        --num_steps 1500 --log_steps 50 \
+        --seed 1024 --lr 0.03 --phi_lr 0.0001 --use_t_phi true \
+        --model_path 'stabilityai/stable-diffusion-2-1-base' \
+        --loss_weight_type '1m_alphas_cumprod' --t_schedule 'random' \
+        --generation_mode 'vsd' \
+        --phi_model 'lora' --lora_scale 1. --lora_vprediction false \
+        --prompt "a photograph of an astronaut riding a horse" \
+        --height 512 --width 512 --batch_size 16 --guidance_scale 7.5 \
+        --particle_num_vsd 2 --particle_num_phi 2 \
+        --log_progress false --save_x0 false --save_phi_model true --multisteps 1 \
+```
 
 #### SDS command line
 ```python
@@ -56,7 +72,10 @@ python prolific_dreamer2d.py \
 
 **t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L31; by default we use 'random', to use from '$U[0.02,0.98] \rightarrow U[0.5,0.98]$' as in the paper, we can use 't_stages2'
 
+**lora_vprediction**: use v-prediction for lora model training
 
-## Interesting Observations (might be wrong, discussion is welcomed)
-1. The final results depend on num_steps and lr and may not 'converge' to a fixed image (especially the background)
-2. By saving the phi model after vsd tuning, and set generation_mode as 't2i' and load_phi_model_path the saved phi model, one may observe (from the generated samples with the same prompt) that the saved phi model is somehow overfitted.
+**batch_size**: batch_size or total particle numbers
+
+**particle_num_vsd**: batch size (particle numbers) for VSD training
+
+**particle_num_phi**: number of particles to train phi model
