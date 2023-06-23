@@ -65,7 +65,9 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--height', default=512, type=int, help='height of image')
     parser.add_argument('--width', default=512, type=int, help='width of image')
     parser.add_argument('--generation_mode', default='sds', type=str, help='sd generation mode')
-    parser.add_argument('--batch_size', default=1, type=int, help='batch_size')
+    parser.add_argument('--batch_size', default=1, type=int, help='batch_size / overall number of particles')
+    parser.add_argument('--particle_num_vsd', default=1, type=int, help='batch size for VSD training')
+    parser.add_argument('--particle_num_phi', default=1, type=int, help='number of particles to train phi model')
     parser.add_argument('--guidance_scale', default=7.5, type=float, help='Scale for classifier-free guidance')
     ### optimizing
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
@@ -88,6 +90,13 @@ def get_parser(**parser_kwargs):
     assert args.generation_mode in ['t2i', 'sds', 'vsd']
     assert args.phi_model in ['lora', 'unet_simple']
     assert args.dtype in ['float', 'half', 'auto']
+    # for sds and t2i, use only args.batch_size
+    if args.generation_mode in ['t2i', 'sds']:
+        args.particle_num_vsd = args.batch_size
+        args.particle_num_phi = args.batch_size
+    assert (args.batch_size >= args.particle_num_vsd) and (args.batch_size >= args.particle_num_phi)
+    if args.batch_size > args.particle_num_vsd:
+        print(f'use multiple ({args.batch_size}) particles!! Will get inconsistent x0 recorded')
     ### set random seed everywhere
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -202,16 +211,17 @@ def main():
         unet_phi = None
     
     ### get text embedding
-    text_input = tokenizer([args.prompt] * args.batch_size, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
+    text_input = tokenizer([args.prompt] * max(args.particle_num_vsd,args.particle_num_phi), padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
     with torch.no_grad():
         text_embeddings = text_encoder(text_input.input_ids.to(device))[0]
     max_length = text_input.input_ids.shape[-1]
     uncond_input = tokenizer(
-        [""] * args.batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
+        [""] * max(args.particle_num_vsd,args.particle_num_phi), padding="max_length", max_length=max_length, return_tensors="pt"
     )
     with torch.no_grad():
-        uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]   
-    text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+        uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
+    text_embeddings_vsd = torch.cat([uncond_embeddings[:args.particle_num_vsd], text_embeddings[:args.particle_num_vsd]])
+    text_embeddings_phi = torch.cat([uncond_embeddings[:args.particle_num_phi], text_embeddings[:args.particle_num_phi]])
 
     ### weight loss
     num_train_timesteps = len(scheduler.betas)
@@ -227,8 +237,10 @@ def main():
     latents = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8))
     latents = latents.to(device, dtype=dtype)
     if args.nerf_init:
+        # current only support sds
+        assert args.generation_mode == 'sds'
         with torch.no_grad():
-            noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings, t=999, guidance_scale=7.5, scheduler=scheduler)
+            noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings_vsd, t=999, guidance_scale=7.5, scheduler=scheduler)
         latents = scheduler.step(noise_pred, 999, latents).pred_original_sample
     latents = latents * scheduler.init_noise_sigma
 
@@ -277,7 +289,7 @@ def main():
             latent_noisy = latents
             # predict the noise residual
             with torch.no_grad():
-                noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+                noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings_vsd).sample
             # perform guidance
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -305,14 +317,17 @@ def main():
         for step, chosen_t in enumerate(pbar):
             t = torch.tensor([chosen_t]).to(device)
             ######## q sample #########
-            noise = torch.randn_like(latents)
-            noisy_latents = scheduler.add_noise(latents, noise, t)
+            # random sample particle_num_vsd particles from latents
+            indices = torch.randperm(latents.size(0))
+            latents_vsd = latents[indices[:args.particle_num_vsd]]
+            noise = torch.randn_like(latents_vsd)
+            noisy_latents = scheduler.add_noise(latents_vsd, noise, t)
             ######## Do the gradient for latents!!! #########
             optimizer.zero_grad()
             # predict x0 use ddim sampling
             # z0_latents = predict_x0_diffuser(unet, scheduler, noisy_latents, text_embeddings, t, guidance_scale=args.guidance_scale)
             # loss step
-            loss, noise_pred, noise_pred_phi = sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings, t, \
+            loss, noise_pred, noise_pred_phi = sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings_vsd, t, \
                                                     guidance_scale=args.guidance_scale, unet_phi=unet_phi, \
                                                         generation_mode=args.generation_mode, phi_model=args.phi_model, \
                                                             cross_attention_kwargs=cross_attention_kwargs, \
@@ -332,15 +347,17 @@ def main():
                 phi_optimizer.zero_grad()
                 if args.use_t_phi:
                     # different t for phi finetuning
-                    t_phi = np.random.choice(chosen_ts, 1, replace=True)[0]
+                    # t_phi = np.random.choice(chosen_ts, 1, replace=True)[0]
+                    t_phi = np.random.choice(list(range(num_train_timesteps)), 1, replace=True)[0]
                     t_phi = torch.tensor([t_phi]).to(device)
-                    noise_phi = torch.randn_like(latents)
-                    noisy_latents_phi = scheduler.add_noise(latents, noise_phi, t_phi)
                 else:
                     t_phi = t
-                    noise_phi = noise
-                    noisy_latents_phi = noisy_latents
-                loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings, t_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=args.lora_vprediction)
+                # random sample particle_num_phi particles from latents
+                indices = torch.randperm(latents.size(0))
+                latents_phi = latents[indices[:args.particle_num_phi]]
+                noise_phi = torch.randn_like(latents_phi)
+                noisy_latents_phi = scheduler.add_noise(latents_phi, noise_phi, t_phi)
+                loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings_phi, t_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=args.lora_vprediction)
                 loss_phi.backward()
                 phi_optimizer.step()
 
@@ -355,7 +372,7 @@ def main():
                 log_steps.append(step)
                 # save current img_tensor
                 # scale and decode the image latents with vae
-                tmp_latents = 1 / 0.18215 * latents.clone().detach()
+                tmp_latents = 1 / 0.18215 * latents_vsd.clone().detach()
                 if args.save_x0:
                     # compute the predicted clean sample x_0
                     pred_latents = scheduler.step(noise_pred, t, noisy_latents).pred_original_sample.to(dtype).clone().detach()
@@ -389,6 +406,7 @@ def main():
         save_image(concatenated_images, f'{args.work_dir}/{image_name}_prgressive.png')
     # scale and decode the image latents with vae
     latents = 1 / 0.18215 * latents.clone()
+    torch.cuda.empty_cache()
     with torch.no_grad():
         image = vae.decode(latents).sample.to(torch.float32)
     save_image((image/2+0.5).clamp(0, 1), f'{args.work_dir}/final_image_{image_name}.png')
