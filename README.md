@@ -27,7 +27,6 @@ python prolific_dreamer2d.py \
         --height 512 --width 512 --batch_size 1 --guidance_scale 7.5 \
         --log_progress true --save_x0 true --save_phi_model true \
 ```
-#!/bin/sh
 
 #### VSD command line multiple particles
 ```python
@@ -79,3 +78,5 @@ python prolific_dreamer2d.py \
 **particle_num_vsd**: batch size (particle numbers) for VSD training
 
 **particle_num_phi**: number of particles to train phi model
+
+**rgb_as_latents**: initialize particles in latent space

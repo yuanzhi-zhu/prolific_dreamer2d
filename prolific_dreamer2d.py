@@ -4,6 +4,7 @@ import sys
 import argparse
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torchvision.utils import save_image
 from tqdm import tqdm
 from datetime import datetime
@@ -64,6 +65,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--prompt', default="a photograph of an astronaut riding a horse", type=str, help='prompt')
     parser.add_argument('--height', default=512, type=int, help='height of image')
     parser.add_argument('--width', default=512, type=int, help='width of image')
+    parser.add_argument('--rgb_as_latents', default=True, type=str2bool, help='width of image')
     parser.add_argument('--generation_mode', default='sds', type=str, help='sd generation mode')
     parser.add_argument('--batch_size', default=1, type=int, help='batch_size / overall number of particles')
     parser.add_argument('--particle_num_vsd', default=1, type=int, help='batch size for VSD training')
@@ -84,7 +86,7 @@ def get_parser(**parser_kwargs):
     args = parser.parse_args()
     # create working directory
     args.run_id = args.run_date + '_' + args.run_time
-    args.work_dir = f'{args.work_dir}_{args.run_id}_{args.generation_mode}_cfg_{args.guidance_scale}_bs_{args.batch_size}_lr_{args.lr}_philr_{args.phi_lr}'
+    args.work_dir = f'{args.work_dir}_{args.run_id}_{args.generation_mode}_cfg_{args.guidance_scale}_bs_{args.batch_size}_num_steps_{args.num_steps}_lr_{args.lr}_philr_{args.phi_lr}_tschedule_{args.t_schedule}'
     args.work_dir = args.work_dir + f'_{args.phi_model}' if args.generation_mode == 'vsd' else args.work_dir
     os.makedirs(args.work_dir, exist_ok=True)
     assert args.generation_mode in ['t2i', 'sds', 'vsd']
@@ -232,21 +234,39 @@ def main():
         scheduler.set_timesteps(args.num_steps)
     else:
         scheduler.set_timesteps(num_train_timesteps)
-
-    ### initialize latents
-    latents = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8))
-    latents = latents.to(device, dtype=dtype)
-    if args.nerf_init:
-        # current only support sds
+    ### initialize particles
+    if args.rgb_as_latents:
+        particles = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8))
+    else:
+        # gaussian in rgb space --> strange artifacts
+        particles = torch.randn((args.batch_size, 3, args.height, args.width))
+        args.lr = args.lr * 1   # need larger lr for rgb particles
+        # ## gaussian in latent space --> not better
+        # particles = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8)).to(device, dtype=dtype)
+        # particles = vae.decode(particles).sample
+    particles = particles.to(device, dtype=dtype)
+    if args.nerf_init and args.rgb_as_latents:
+        # current only support sds and experimental for only rgb_as_latents==True
         assert args.generation_mode == 'sds'
         with torch.no_grad():
-            noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings_vsd, t=999, guidance_scale=7.5, scheduler=scheduler)
-        latents = scheduler.step(noise_pred, 999, latents).pred_original_sample
-    latents = latents * scheduler.init_noise_sigma
+            noise_pred = predict_noise0_diffuser(unet, particles, text_embeddings_vsd, t=999, guidance_scale=7.5, scheduler=scheduler)
+        particles = scheduler.step(noise_pred, 999, particles).pred_original_sample
+    # latents = latents * scheduler.init_noise_sigma
+    
+    def get_latents(rgb_BCHW, rgb_as_latents=False):
+        ### get latents from particles
+        if rgb_as_latents:
+            latents = F.interpolate(rgb_BCHW, (64, 64), mode="bilinear", align_corners=False)
+        else:
+            rgb_BCHW_512 = F.interpolate(rgb_BCHW, (512, 512), mode="bilinear", align_corners=False)
+            # encode image into latents with vae
+            latents = 0.18215 * vae.encode(rgb_BCHW_512).latent_dist.sample()
+        return latents
 
     #######################################################################################
     ### configure optimizer and loss function
-    latents.requires_grad = True
+    particles.requires_grad = True
+
     ### Initialize optimizer & scheduler
     if args.generation_mode == 'vsd':
         if args.phi_model in ['lora', 'unet_simple']:
@@ -254,9 +274,9 @@ def main():
             print(f'number of trainable parameters of phi model in optimizer: {sum(p.numel() for p in phi_params if p.requires_grad)}')
     if args.dtype == 'half':
         # optimizer = torch.optim.Adam([latents], lr=args.lr, betas=(0.,0.))
-        optimizer = torch.optim.SGD([latents], lr=args.lr, momentum=0.2)
+        optimizer = torch.optim.SGD([particles], lr=args.lr, momentum=0.2)
     else:
-        optimizer = torch.optim.Adam([latents], lr=args.lr)
+        optimizer = torch.optim.Adam([particles], lr=args.lr)
     if args.use_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, \
             start_factor=args.lr_scheduler_start_factor, total_iters=args.lr_scheduler_iters)
@@ -282,6 +302,8 @@ def main():
             unet_phi.load_attn_procs(args.load_phi_model_path)
             unet = unet_phi.to(device)
         step = 0
+        # get latent of all particles
+        latents = get_latents(particles, args.rgb_as_latents)
         for t in tqdm(scheduler.timesteps):
             # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
             latent_model_input = torch.cat([latents] * 2)
@@ -315,6 +337,8 @@ def main():
     elif args.generation_mode in ['sds', 'vsd']:
         cross_attention_kwargs = {'scale': args.lora_scale} if (args.generation_mode == 'vsd' and args.phi_model == 'lora') else {}
         for step, chosen_t in enumerate(pbar):
+            # get latent of all particles
+            latents = get_latents(particles, args.rgb_as_latents)
             t = torch.tensor([chosen_t]).to(device)
             ######## q sample #########
             # random sample particle_num_vsd particles from latents
@@ -404,6 +428,9 @@ def main():
     if args.log_progress and args.batch_size == 1:
         concatenated_images = torch.cat(image_progress, dim=0)
         save_image(concatenated_images, f'{args.work_dir}/{image_name}_prgressive.png')
+    with torch.no_grad():
+        # get latent of all particles
+        latents = get_latents(particles, args.rgb_as_latents)
     # scale and decode the image latents with vae
     latents = 1 / 0.18215 * latents.clone()
     torch.cuda.empty_cache()
