@@ -33,7 +33,8 @@ def get_t_schedule(num_train_timesteps, args, loss_weight=None):
     # Create a list of time steps from 0 to num_train_timesteps
     ts = list(range(num_train_timesteps))
     # set ts to U[0.02,0.98] as least
-    ts = ts[20:args.t_end] if args.t_end < 980 else ts[20:980]
+    assert (args.t_start >= 20) and (args.t_end <= 980)
+    ts = ts[args.t_start:args.t_end]
 
     # If the scheduling strategy is 'random', choose args.num_steps random time steps without replacement
     if args.t_schedule == 'random':
@@ -331,3 +332,77 @@ def update_curve(values, label, x_label, y_label, model_path, run_id, log_steps=
     ax.legend()
     plt.savefig(f'{model_path}/{label}_curve_{run_id}.png', dpi=600)
     plt.close()
+
+
+### siren from https://github.com/vsitzmann/siren/
+class SineLayer(nn.Module):
+    # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of omega_0.
+    
+    # If is_first=True, omega_0 is a frequency factor which simply multiplies the activations before the 
+    # nonlinearity. Different signals may require different omega_0 in the first layer - this is a 
+    # hyperparameter.
+    
+    # If is_first=False, then the weights will be divided by omega_0 so as to keep the magnitude of 
+    # activations constant, but boost gradients to the weight matrix (see supplement Sec. 1.5)
+    
+    def __init__(self, in_features, out_features, bias=True,
+                 is_first=False, omega_0=30):
+        super().__init__()
+        self.omega_0 = omega_0
+        self.is_first = is_first
+        self.in_features = in_features
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        self.init_weights()
+    
+    def init_weights(self):
+        with torch.no_grad():
+            if self.is_first:
+                self.linear.weight.uniform_(-1 / self.in_features, 
+                                             1 / self.in_features)      
+            else:
+                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / self.omega_0, 
+                                             np.sqrt(6 / self.in_features) / self.omega_0)
+    def forward(self, input):
+        return torch.sin(self.omega_0 * self.linear(input))
+    
+    
+class Siren(nn.Module):
+    def __init__(self, in_features, hidden_features, hidden_layers, out_features, device, \
+                 outermost_linear=True, first_omega_0=30, hidden_omega_0=30.):
+        super().__init__()
+        
+        self.net = []
+        self.net.append(SineLayer(in_features, hidden_features, 
+                                  is_first=True, omega_0=first_omega_0))
+        for i in range(hidden_layers):
+            self.net.append(SineLayer(hidden_features, hidden_features, 
+                                      is_first=False, omega_0=hidden_omega_0))
+        if outermost_linear:
+            final_linear = nn.Linear(hidden_features, out_features)
+            with torch.no_grad():
+                final_linear.weight.uniform_(-np.sqrt(6 / hidden_features) / hidden_omega_0, 
+                                              np.sqrt(6 / hidden_features) / hidden_omega_0)
+            self.net.append(final_linear)
+        else:
+            self.net.append(SineLayer(hidden_features, out_features, 
+                                      is_first=False, omega_0=hidden_omega_0))
+        self.net = nn.Sequential(*self.net)
+        self.device = device
+        self.out_features = out_features
+
+    def forward(self, coords):
+        # coords = coords.clone().detach().requires_grad_(True) # allows to take derivative w.r.t. input
+        output = self.net(coords)
+        return output #, coords
+    
+    def generate_image(self, img_size=64):
+        # Generate an input grid coordinates in a range of -1 to 1.
+        grid = torch.Tensor([[[2*(x / (img_size - 1)) - 1, 2*(y / (img_size - 1)) - 1] for y in range(img_size)] for x in range(img_size)])
+        grid = grid.view(-1, 2)  # Reshape to (img_size*img_size, 2)
+        grid = grid.to(self.device)
+        rgb_values = self.forward(grid)
+        rgb_values = torch.tanh(rgb_values)     # [-1, 1]
+        # Reshape to an image
+        rgb_values = rgb_values.view(1, img_size, img_size, self.out_features)
+        image = rgb_values.permute(0, 3, 1, 2)
+        return image

@@ -67,9 +67,9 @@ python prolific_dreamer2d.py \
 
 **use_t_phi**: use different t to train phi model
 
-**loss_weight**: which weight to use for SDS/VSD loss, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L91
+**loss_weight**: which weight to use for SDS/VSD loss, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L109
 
-**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L31; by default we use 'random', to use from '$U[0.02,0.98] \rightarrow U[0.5,0.98]$' as in the paper, we can use 't_stages2'
+**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L32; by default we use 'random', to use from '$U[0.02,0.98] \rightarrow U[0.5,0.98]$' as in the paper, we can use 't_stages2'
 
 **lora_vprediction**: use v-prediction for lora model training
 
@@ -80,3 +80,5 @@ python prolific_dreamer2d.py \
 **particle_num_phi**: number of particles to train phi model
 
 **rgb_as_latents**: initialize particles in latent space
+
+**use_mlp_particle**: use siren mlp as the 2d representation of image
