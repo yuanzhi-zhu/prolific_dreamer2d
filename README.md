@@ -5,14 +5,14 @@ This is a third-party implementation of the 2D demos in the paper: [ProlificDrea
 
 <p align="center">
   <img src="figs/illustration.png" width="900px"/><br/>
-  <em>Sample generated with VSD sampling (CFG=7.5)</em>
+  <em>Progress of generation with VSD sampling (CFG=7.5)</em>
 </p>
 
+<p align="center">
+  <img src="figs/comparison.png" width="900px"/><br/>
+  <em>Comparison between SDS, VSD and Text2Image with different CFG</em>
+</p>
 
-## Usage
-```sh
-bash run.sh
-```
 
 #### VSD command line
 ```python
