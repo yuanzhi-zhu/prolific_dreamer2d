@@ -164,26 +164,28 @@ def loss_weights(betas, args):
     return weights
 
 
-def predict_noise0_diffuser(unet, latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None, lora_v=False):
-    batch_size = latents.shape[0]
-    latent_model_input = torch.cat([latents] * 2)
+def predict_noise0_diffuser(unet, noisy_latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None, lora_v=False):
+    batch_size = noisy_latents.shape[0]
+    latent_model_input = torch.cat([noisy_latents] * 2)
     latent_model_input = scheduler.scale_model_input(latent_model_input, t)
 
     if lora_v:
         # https://github.com/threestudio-project/threestudio/blob/77de7d75c34e29a492f2dda498c65d2fd4a767ff/threestudio/models/guidance/stable_diffusion_vsd_guidance.py#L512
         alphas_cumprod = scheduler.alphas_cumprod.to(
-            device=latents.device, dtype=latents.dtype
+            device=noisy_latents.device, dtype=noisy_latents.dtype
         )
         alpha_t = alphas_cumprod[t] ** 0.5
         sigma_t = (1 - alphas_cumprod[t]) ** 0.5
     if guidance_scale == 1.:
-        noise_pred = unet(latents, t, encoder_hidden_states=text_embeddings[batch_size:], cross_attention_kwargs=cross_attention_kwargs).sample
+        noise_pred = unet(noisy_latents, t, encoder_hidden_states=text_embeddings[batch_size:], cross_attention_kwargs=cross_attention_kwargs).sample
         if lora_v:
-            noise_pred = latents * sigma_t.view(-1, 1, 1, 1) + noise_pred * alpha_t.view(-1, 1, 1, 1)
+            # assume the output of unet is v-pred, convert to noise-pred now
+            noise_pred = noisy_latents * sigma_t.view(-1, 1, 1, 1) + noise_pred * alpha_t.view(-1, 1, 1, 1)
     else:
         # predict the noise residual
         noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings, cross_attention_kwargs=cross_attention_kwargs).sample
         if lora_v:
+            # assume the output of unet is v-pred, convert to noise-pred now
             noise_pred = latent_model_input * torch.cat([sigma_t] * 2, dim=0).view(-1, 1, 1, 1) + noise_pred * torch.cat([alpha_t] * 2, dim=0).view(-1, 1, 1, 1)
         # perform guidance
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -205,7 +207,8 @@ def predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, g
         # Generate a list of indices
         indices = [int((steps - i) * step_size) for i in range(steps)]
         if indices[0] != t_start:
-            indices.insert(0, t_start)    # add start point
+            # indices.insert(0, t_start)    # add start point
+            indices[0] = t_start    # replace start point
     else:
         indices = [int((t_start - i)) for i in range(t_start)]
     if indices[-1] != 0:

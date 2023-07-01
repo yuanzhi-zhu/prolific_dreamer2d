@@ -89,7 +89,7 @@ def get_parser(**parser_kwargs):
     args = parser.parse_args()
     # create working directory
     args.run_id = args.run_date + '_' + args.run_time
-    args.work_dir = f'{args.work_dir}_{args.run_id}_{args.generation_mode}_cfg_{args.guidance_scale}_bs_{args.batch_size}_num_steps_{args.num_steps}_lr_{args.lr}_philr_{args.phi_lr}_tschedule_{args.t_schedule}'
+    args.work_dir = f'{args.work_dir}_{args.run_id}_{args.generation_mode}_cfg_{args.guidance_scale}_bs_{args.batch_size}_num_steps_{args.num_steps}_tschedule_{args.t_schedule}'
     args.work_dir = args.work_dir + f'_{args.phi_model}' if args.generation_mode == 'vsd' else args.work_dir
     os.makedirs(args.work_dir, exist_ok=True)
     assert args.generation_mode in ['t2i', 'sds', 'vsd']
@@ -190,10 +190,11 @@ def main():
         elif args.phi_model == 'unet_simple':
             # initialize simple unet, same input/output as (pre-trained) unet
             ### IMPORTANT: need the proper (wide) channel numbers
+            channels = 4 if args.rgb_as_latents else 3
             unet_phi = UNet2DConditionModel(
                                         sample_size=64,
-                                        in_channels=4,
-                                        out_channels=4,
+                                        in_channels=channels,
+                                        out_channels=channels,
                                         layers_per_block=1,
                                         block_out_channels=(64,128,256),
                                         down_block_types=(
@@ -206,12 +207,13 @@ def main():
                                             "CrossAttnUpBlock2D",
                                             "CrossAttnUpBlock2D",
                                         ),
-                                        cross_attention_dim=768,
+                                        cross_attention_dim=unet.config.cross_attention_dim,
                                         ).to(dtype)
             if args.load_phi_model_path:
                 unet_phi = unet_phi.from_pretrained(args.load_phi_model_path)
             unet_phi = unet_phi.to(device)
             phi_params = list(unet_phi.parameters())
+            vae_phi = vae
     elif args.generation_mode == 'sds':
         unet_phi = None
     

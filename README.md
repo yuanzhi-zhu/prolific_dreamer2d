@@ -2,6 +2,7 @@
 
 This is a third-party implementation of the 2D demos in the paper: [ProlificDreamer: High-Fidelity and Diverse Text-to-3D Generation with Variational Score Distillation](https://arxiv.org/abs/2305.16213).
 
+This code does *NOT* serve as a faithful re-implementation, and please feel free to raise issues for potential bugs.
 
 <p align="center">
   <img src="figs/illustration.png" width="900px"/><br/>
@@ -40,7 +41,7 @@ python prolific_dreamer2d.py \
         --prompt "a photograph of an astronaut riding a horse" \
         --height 512 --width 512 --batch_size 16 --guidance_scale 7.5 \
         --particle_num_vsd 2 --particle_num_phi 2 \
-        --log_progress false --save_x0 false --save_phi_model true --multisteps 1 \
+        --log_progress false --save_x0 false --save_phi_model true
 ```
 
 #### SDS command line
@@ -69,7 +70,7 @@ python prolific_dreamer2d.py \
 
 **loss_weight**: which weight to use for SDS/VSD loss, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L109
 
-**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L32; by default we use 'random', to use from '$U[0.02,0.98] \rightarrow U[0.5,0.98]$' as in the paper, we can use 't_stages2'
+**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L32; by default we use 'random', to use the 2 stage time schedule $U[0.02,0.98] \rightarrow U[0.5,0.98]$ as in the paper, we can use 't_stages2'
 
 **lora_vprediction**: use v-prediction for lora model training
 
