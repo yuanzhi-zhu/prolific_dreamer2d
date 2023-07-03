@@ -4,6 +4,8 @@ This is a third-party implementation of the 2D demos in the paper: [ProlificDrea
 
 This code does *NOT* serve as a faithful re-implementation, and please feel free to raise issues for potential bugs.
 
+Feel free to try the colab notebook https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/prolific_dreamer_2D.ipynb
+
 <p align="center">
   <img src="figs/illustration.png" width="900px"/><br/>
   <em>Progress of generation with VSD sampling (CFG=7.5)</em>
@@ -68,9 +70,9 @@ python prolific_dreamer2d.py \
 
 **use_t_phi**: use different t to train phi model
 
-**loss_weight**: which weight to use for SDS/VSD loss, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L109
+**loss_weight**: which weight to use for SDS/VSD loss, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L111
 
-**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L32; by default we use 'random', to use the 2 stage time schedule $U[0.02,0.98] \rightarrow U[0.5,0.98]$ as in the paper, we can use 't_stages2'
+**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L34; by default we use 'random', to use the 2 stage time schedule $U[0.02,0.98] \rightarrow U[0.5,0.98]$ as in the paper, we can use 't_stages2'
 
 **lora_vprediction**: use v-prediction for lora model training
 

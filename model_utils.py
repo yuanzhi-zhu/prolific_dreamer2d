@@ -20,7 +20,9 @@ class SpecifyGradient(torch.autograd.Function):
     def forward(ctx, input_tensor, gt_grad):
         ctx.save_for_backward(gt_grad)
         # we return a dummy value 1, which will be scaled by amp's scaler so we get the scale in backward.
-        return torch.ones([1], device=input_tensor.device, dtype=input_tensor.dtype)
+        # return torch.ones([1], device=input_tensor.device, dtype=input_tensor.dtype)
+        # return the mse loss (grad_scale * (noise_pred - noise_pred_phi.detach()))**2: not a good indicator
+        return torch.mean(gt_grad**2).to(device=input_tensor.device, dtype=input_tensor.dtype)
 
     @staticmethod
     @custom_bwd
