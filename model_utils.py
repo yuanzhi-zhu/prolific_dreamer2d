@@ -166,7 +166,7 @@ def loss_weights(betas, args):
     return weights
 
 
-def predict_noise0_diffuser(unet, noisy_latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None, lora_v=False):
+def predict_noise0_diffuser(unet, noisy_latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None, lora_v=False, half_inference=False):
     batch_size = noisy_latents.shape[0]
     latent_model_input = torch.cat([noisy_latents] * 2)
     latent_model_input = scheduler.scale_model_input(latent_model_input, t)
@@ -178,6 +178,11 @@ def predict_noise0_diffuser(unet, noisy_latents, text_embeddings, t, guidance_sc
         )
         alpha_t = alphas_cumprod[t] ** 0.5
         sigma_t = (1 - alphas_cumprod[t]) ** 0.5
+    # Convert inputs to half precision
+    if half_inference:
+        noisy_latents = noisy_latents.clone().half()
+        text_embeddings = text_embeddings.clone().half()
+        latent_model_input = latent_model_input.clone().half()
     if guidance_scale == 1.:
         noise_pred = unet(noisy_latents, t, encoder_hidden_states=text_embeddings[batch_size:], cross_attention_kwargs=cross_attention_kwargs).sample
         if lora_v:
@@ -192,11 +197,11 @@ def predict_noise0_diffuser(unet, noisy_latents, text_embeddings, t, guidance_sc
         # perform guidance
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
+    noise_pred = noise_pred.float()
     return noise_pred
 
 
-def predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None, steps=1, eta=0):
+def predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, guidance_scale=7.5, cross_attention_kwargs={}, scheduler=None, steps=1, eta=0, half_inference=False):
     latents = noisy_latents
     # get sub-sequence with length step_size
     t_start = t.item()
@@ -219,7 +224,7 @@ def predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, g
     for i in range(len(indices)):
         t = torch.tensor([indices[i]] * t.shape[0], device=t.device)
         noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings, t, guidance_scale=guidance_scale, \
-                                             cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler)
+                                             cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, half_inference=half_inference)
         pred_latents = scheduler.step(noise_pred, t, latents).pred_original_sample
         if indices[i+1] == 0:
             ### use pred_latents and latents calculate equivalent noise_pred
@@ -247,16 +252,17 @@ def predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, g
 
 def sds_vsd_grad_diffuser(unet, latents, noise, text_embeddings, t, unet_phi=None, guidance_scale=7.5, \
                         grad_scale=1, cfg_phi=1., generation_mode='sds', phi_model='lora', \
-                            cross_attention_kwargs={}, multisteps=1, scheduler=None, lora_v=False):
+                            cross_attention_kwargs={}, multisteps=1, scheduler=None, lora_v=False, \
+                                half_inference = False):
     # ref to https://github.com/ashawkey/stable-dreamfusion/blob/main/guidance/sd_utils.py#L114
     unet_cross_attention_kwargs = {'scale': 0} if (generation_mode == 'vsd' and phi_model == 'lora' and not lora_v) else {}
     with torch.no_grad():
         # predict the noise residual with unet
         # set cross_attention_kwargs={'scale': 0} to use the pre-trained model
         if multisteps > 1:
-            noise_pred = predict_noise0_diffuser_multistep(unet, latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler, steps=multisteps, eta=0.)
+            noise_pred = predict_noise0_diffuser_multistep(unet, latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler, steps=multisteps, eta=0., half_inference=half_inference)
         else:
-            noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler)
+            noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler, half_inference=half_inference)
 
     if generation_mode == 'sds':
         # SDS

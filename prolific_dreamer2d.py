@@ -54,7 +54,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--run_date', type=str, default=current_datetime.strftime("%Y%m%d"), help='Run date')
     parser.add_argument('--run_time', type=str, default=current_datetime.strftime("%H%M"), help='Run time')
     parser.add_argument('--work_dir', type=str, default='work_dir/prolific_dreamer2d', help='Working directory')
-    parser.add_argument('--dtype', type=str, default='float', help='data type')
+    parser.add_argument('--half_inference', type=str2bool, default=False, help='inference sd with half precision')
     parser.add_argument('--save_x0', type=str2bool, default=False, help='save predicted x0')
     parser.add_argument('--save_phi_model', type=str2bool, default=False, help='save save_phi_model, lora or simple unet')
     parser.add_argument('--load_phi_model_path', type=str, default='', help='phi_model_path to load')
@@ -94,7 +94,8 @@ def get_parser(**parser_kwargs):
     os.makedirs(args.work_dir, exist_ok=True)
     assert args.generation_mode in ['t2i', 'sds', 'vsd']
     assert args.phi_model in ['lora', 'unet_simple']
-    assert args.dtype in ['float', 'half', 'auto']
+    if args.half_inference:
+        assert args.generation_mode in ['t2i', 'sds'], "half precision doesnot support vsd"
     # for sds and t2i, use only args.batch_size
     if args.generation_mode in ['t2i', 'sds']:
         args.particle_num_vsd = args.batch_size
@@ -123,7 +124,7 @@ class nullcontext:
 def main():
     args = get_parser()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dtype = torch.float32 if args.dtype == 'float' else torch.float16
+    dtype = torch.float32 # use float32 by default
     image_name = args.prompt.replace(' ', '_')
     shutil.copyfile(__file__, join(args.work_dir, os.path.basename(__file__)))
     ### set up logger
@@ -158,11 +159,13 @@ def main():
     # 4. Scheduler
     scheduler = DDIMScheduler.from_pretrained(args.model_path, subfolder="scheduler", torch_dtype=dtype)
 
+    if args.half_inference:
+        unet = unet.half()
+        vae = vae.half()
+        text_encoder = text_encoder.half()
+    unet = unet.to(device)
     vae = vae.to(device)
     text_encoder = text_encoder.to(device)
-    if args.dtype == 'half':
-        unet = unet.half()
-    unet = unet.to(device)
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
@@ -250,7 +253,7 @@ def main():
         particles = nn.ModuleList([Siren(2, hidden_features=256, hidden_layers=3, out_features=out_features, device=device) for _ in range(args.batch_size)])
     else:
         if args.rgb_as_latents:
-            particles = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8))
+            particles = torch.randn((args.batch_size, unet.config.in_channels, args.height // 8, args.width // 8))
         else:
             # gaussian in rgb space --> strange artifacts
             particles = torch.randn((args.batch_size, 3, args.height, args.width))
@@ -306,11 +309,7 @@ def main():
         if args.phi_model in ['lora', 'unet_simple']:
             phi_optimizer = torch.optim.AdamW([{"params": phi_params, "lr": args.phi_lr}], lr=args.phi_lr)
             print(f'number of trainable parameters of phi model in optimizer: {sum(p.numel() for p in phi_params if p.requires_grad)}')
-    if args.dtype == 'half':
-        # optimizer = torch.optim.Adam([latents], lr=args.lr, betas=(0.,0.))
-        optimizer = torch.optim.SGD(particles_to_optimize, lr=args.lr, momentum=0.2)
-    else:
-        optimizer = torch.optim.Adam(particles_to_optimize, lr=args.lr)
+    optimizer = torch.optim.Adam(particles_to_optimize, lr=args.lr)
     if args.use_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, \
             start_factor=args.lr_scheduler_start_factor, total_iters=args.lr_scheduler_iters)
@@ -339,6 +338,9 @@ def main():
         # get latent of all particles
         assert args.use_mlp_particle == False
         latents = get_latents(particles, args.rgb_as_latents)
+        if args.half_inference:
+            latents = latents.half()
+            text_embeddings_vsd = text_embeddings_vsd.half()
         for t in tqdm(scheduler.timesteps):
             # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
             latent_model_input = torch.cat([latents] * 2)
@@ -361,8 +363,12 @@ def main():
                     # compute the predicted clean sample x_0
                     pred_latents = scheduler.step(noise_pred, t, latent_noisy).pred_original_sample.to(dtype).clone().detach()
                 with torch.no_grad():
+                    if args.half_inference:
+                        tmp_latents = tmp_latents.half()
                     image_ = vae.decode(tmp_latents).sample.to(torch.float32)
                     if args.save_x0:
+                        if args.half_inference:
+                            pred_latents = pred_latents.half()
                         image_x0 = vae.decode(pred_latents / 0.18215).sample.to(torch.float32)
                         image = torch.cat((image_,image_x0), dim=2)
                 if args.log_progress:
@@ -390,7 +396,8 @@ def main():
                                                     guidance_scale=args.guidance_scale, unet_phi=unet_phi, \
                                                         generation_mode=args.generation_mode, phi_model=args.phi_model, \
                                                             cross_attention_kwargs=cross_attention_kwargs, \
-                                                                multisteps=args.multisteps, scheduler=scheduler, lora_v=args.lora_vprediction)
+                                                                multisteps=args.multisteps, scheduler=scheduler, lora_v=args.lora_vprediction, \
+                                                                    half_inference=args.half_inference)
             ## weighting
             loss *= loss_weight[int(t)]
             ## Compute gradients
@@ -438,8 +445,12 @@ def main():
                     if args.generation_mode == 'vsd':
                         pred_latents_phi = scheduler.step(noise_pred_phi, t, noisy_latents).pred_original_sample.to(dtype).clone().detach()
                 with torch.no_grad():
+                    if args.half_inference:
+                        tmp_latents = tmp_latents.half()
                     image_ = vae.decode(tmp_latents).sample.to(torch.float32)
                     if args.save_x0:
+                        if args.half_inference:
+                            pred_latents = pred_latents.half()
                         image_x0 = vae.decode(pred_latents / 0.18215).sample.to(torch.float32)
                         if args.generation_mode == 'vsd':
                             image_x0_phi = vae_phi.decode(pred_latents_phi / 0.18215).sample.to(torch.float32)
@@ -469,8 +480,13 @@ def main():
     # scale and decode the image latents with vae
     latents = 1 / 0.18215 * latents.clone()
     torch.cuda.empty_cache()
-    with torch.no_grad():
-        image = vae.decode(latents).sample.to(torch.float32)
+    if args.generation_mode == 't2i':
+        image = image_
+    else:
+        with torch.no_grad():
+            if args.half_inference:
+                latents = latents.half()
+            image = vae.decode(latents).sample.to(torch.float32)
     save_image((image/2+0.5).clamp(0, 1), f'{args.work_dir}/final_image_{image_name}.png')
 
     if args.generation_mode in ['vsd'] and args.save_phi_model:
