@@ -110,7 +110,7 @@ def get_t_schedule(num_train_timesteps, args, loss_weight=None):
 
 def loss_weights(betas, args):
     num_train_timesteps = len(betas)
-    betas = torch.tensor(betas)
+    betas = torch.tensor(betas) if not torch.is_tensor(betas) else betas
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, axis=0)
     sqrt_alphas_cumprod     = torch.sqrt(alphas_cumprod)

@@ -74,11 +74,13 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--particle_num_vsd', default=1, type=int, help='batch size for VSD training')
     parser.add_argument('--particle_num_phi', default=1, type=int, help='number of particles to train phi model')
     parser.add_argument('--guidance_scale', default=7.5, type=float, help='Scale for classifier-free guidance')
+    parser.add_argument('--cfg_phi', default=1., type=float, help='Scale for classifier-free guidance of phi model')
     ### optimizing
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--phi_lr', type=float, default=0.0001, help='Learning rate for phi model')
     parser.add_argument('--phi_model', type=str, default='lora', help='models servered as epsilon_phi')
     parser.add_argument('--use_t_phi', type=str2bool, default=False, help='use different t for phi finetuning')
+    parser.add_argument('--phi_update_step', type=int, default=1, help='phi finetuning steps in each iteration')
     parser.add_argument('--lora_vprediction', type=str2bool, default=False, help='use v prediction model for lora')
     parser.add_argument('--lora_scale', type=float, default=1.0, help='lora_scale of the unet cross attn')
     parser.add_argument('--use_scheduler', default=False, type=str2bool, help='use_scheduler for lr')
@@ -86,6 +88,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--lr_scheduler_iters', type=int, default=300, help='Iterations for learning rate scheduler')
     parser.add_argument('--loss_weight_type', type=str, default='none', help='type of loss weight')
     parser.add_argument('--nerf_init', type=str2bool, default=False, help='initialize with diffusion models as mean predictor')
+    parser.add_argument('--grad_scale', type=float, default=1., help='grad_scale for loss in vsd')
     args = parser.parse_args()
     # create working directory
     args.run_id = args.run_date + '_' + args.run_time
@@ -397,7 +400,8 @@ def main():
                                                         generation_mode=args.generation_mode, phi_model=args.phi_model, \
                                                             cross_attention_kwargs=cross_attention_kwargs, \
                                                                 multisteps=args.multisteps, scheduler=scheduler, lora_v=args.lora_vprediction, \
-                                                                    half_inference=args.half_inference)
+                                                                    half_inference=args.half_inference,
+                                                                        cfg_phi=args.cfg_phi, grad_scale=args.grad_scale)
             ## weighting
             loss *= loss_weight[int(t)]
             ## Compute gradients
@@ -410,22 +414,23 @@ def main():
             ######## Do the gradient for unet_phi!!! #########
             if args.generation_mode == 'vsd':
                 ## update the unet (phi) model 
-                phi_optimizer.zero_grad()
-                if args.use_t_phi:
-                    # different t for phi finetuning
-                    # t_phi = np.random.choice(chosen_ts, 1, replace=True)[0]
-                    t_phi = np.random.choice(list(range(num_train_timesteps)), 1, replace=True)[0]
-                    t_phi = torch.tensor([t_phi]).to(device)
-                else:
-                    t_phi = t
-                # random sample particle_num_phi particles from latents
-                indices = torch.randperm(latents.size(0))
-                latents_phi = latents[indices[:args.particle_num_phi]]
-                noise_phi = torch.randn_like(latents_phi)
-                noisy_latents_phi = scheduler.add_noise(latents_phi, noise_phi, t_phi)
-                loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings_phi, t_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=args.lora_vprediction)
-                loss_phi.backward()
-                phi_optimizer.step()
+                for _ in range(args.phi_update_step):
+                    phi_optimizer.zero_grad()
+                    if args.use_t_phi:
+                        # different t for phi finetuning
+                        # t_phi = np.random.choice(chosen_ts, 1, replace=True)[0]
+                        t_phi = np.random.choice(list(range(num_train_timesteps)), 1, replace=True)[0]
+                        t_phi = torch.tensor([t_phi]).to(device)
+                    else:
+                        t_phi = t
+                    # random sample particle_num_phi particles from latents
+                    indices = torch.randperm(latents.size(0))
+                    latents_phi = latents[indices[:args.particle_num_phi]]
+                    noise_phi = torch.randn_like(latents_phi)
+                    noisy_latents_phi = scheduler.add_noise(latents_phi, noise_phi, t_phi)
+                    loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings_phi, t_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=args.lora_vprediction)
+                    loss_phi.backward()
+                    phi_optimizer.step()
 
             ### Store loss and step
             train_loss_values.append(loss.item())
@@ -466,7 +471,7 @@ def main():
                 update_curve(train_loss_values, 'Train_loss', 'steps', 'Loss', args.work_dir, args.run_id)
                 update_curve(ave_train_loss_values, 'Ave_Train_loss', 'steps', 'Loss', args.work_dir, args.run_id, log_steps=log_steps[1:])
                 # calculate psnr value and update curve
-            if first_iteration:
+            if first_iteration and device==torch.device('cuda'):
                 global_free, total_gpu = torch.cuda.mem_get_info(0)
                 logger.info(f'global free and total GPU memory: {round(global_free/1024**3,6)} GB, {round(total_gpu/1024**3,6)} GB')
                 first_iteration = False
