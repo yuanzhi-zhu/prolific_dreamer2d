@@ -14,23 +14,6 @@ from diffusers.models.attention_processor import (
 )
 from diffusers.loaders import AttnProcsLayers
 
-class SpecifyGradient(torch.autograd.Function):
-    @staticmethod
-    @custom_fwd
-    def forward(ctx, input_tensor, gt_grad):
-        ctx.save_for_backward(gt_grad)
-        # we return a dummy value 1, which will be scaled by amp's scaler so we get the scale in backward.
-        # return torch.ones([1], device=input_tensor.device, dtype=input_tensor.dtype)
-        # return the mse loss (grad_scale * (noise_pred - noise_pred_phi.detach()))**2: not a good indicator
-        return torch.mean(gt_grad**2).to(device=input_tensor.device, dtype=input_tensor.dtype)
-
-    @staticmethod
-    @custom_bwd
-    def backward(ctx, grad_scale):
-        gt_grad, = ctx.saved_tensors
-        gt_grad = gt_grad * grad_scale
-        return gt_grad, None
-
 def get_t_schedule(num_train_timesteps, args, loss_weight=None):
     # Create a list of time steps from 0 to num_train_timesteps
     ts = list(range(num_train_timesteps))
@@ -108,7 +91,7 @@ def get_t_schedule(num_train_timesteps, args, loss_weight=None):
     return chosen_ts
 
 
-def loss_weights(betas, args):
+def get_loss_weights(betas, args):
     num_train_timesteps = len(betas)
     betas = torch.tensor(betas) if not torch.is_tensor(betas) else betas
     alphas = 1.0 - betas
@@ -250,7 +233,7 @@ def predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, g
     # return out["pred_xstart"]
 
 
-def sds_vsd_grad_diffuser(unet, latents, noise, text_embeddings, t, unet_phi=None, guidance_scale=7.5, \
+def sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings, t, unet_phi=None, guidance_scale=7.5, \
                         grad_scale=1, cfg_phi=1., generation_mode='sds', phi_model='lora', \
                             cross_attention_kwargs={}, multisteps=1, scheduler=None, lora_v=False, \
                                 half_inference = False):
@@ -260,9 +243,9 @@ def sds_vsd_grad_diffuser(unet, latents, noise, text_embeddings, t, unet_phi=Non
         # predict the noise residual with unet
         # set cross_attention_kwargs={'scale': 0} to use the pre-trained model
         if multisteps > 1:
-            noise_pred = predict_noise0_diffuser_multistep(unet, latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler, steps=multisteps, eta=0., half_inference=half_inference)
+            noise_pred = predict_noise0_diffuser_multistep(unet, noisy_latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler, steps=multisteps, eta=0., half_inference=half_inference)
         else:
-            noise_pred = predict_noise0_diffuser(unet, latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler, half_inference=half_inference)
+            noise_pred = predict_noise0_diffuser(unet, noisy_latents, text_embeddings, t, guidance_scale=guidance_scale, cross_attention_kwargs=unet_cross_attention_kwargs, scheduler=scheduler, half_inference=half_inference)
 
     if generation_mode == 'sds':
         # SDS
@@ -270,15 +253,14 @@ def sds_vsd_grad_diffuser(unet, latents, noise, text_embeddings, t, unet_phi=Non
         noise_pred_phi = noise
     elif generation_mode == 'vsd':
         with torch.no_grad():
-            noise_pred_phi = predict_noise0_diffuser(unet_phi, latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=lora_v)
+            noise_pred_phi = predict_noise0_diffuser(unet_phi, noisy_latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=lora_v)
         # VSD
         grad = grad_scale * (noise_pred - noise_pred_phi.detach())
 
     grad = torch.nan_to_num(grad)
-    # since we omitted an item in grad, we need to use the custom function to specify the gradient
-    loss = SpecifyGradient.apply(latents, grad)
 
-    return loss, noise_pred.detach().clone(), noise_pred_phi.detach().clone()
+    ## return grad
+    return grad, noise_pred.detach().clone(), noise_pred_phi.detach().clone()
 
 def phi_vsd_grad_diffuser(unet_phi, latents, noise, text_embeddings, t, cfg_phi=1., grad_scale=1, cross_attention_kwargs={}, scheduler=None, lora_v=False):
     loss_fn = nn.MSELoss()

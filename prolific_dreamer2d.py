@@ -12,7 +12,7 @@ from datetime import datetime
 import random
 from model_utils import (
             get_t_schedule, 
-            loss_weights, 
+            get_loss_weights, 
             sds_vsd_grad_diffuser, 
             phi_vsd_grad_diffuser, 
             extract_lora_diffusers,
@@ -238,7 +238,7 @@ def main():
 
     ### weight loss
     num_train_timesteps = len(scheduler.betas)
-    loss_weight = loss_weights(scheduler.betas, args)
+    loss_weights = get_loss_weights(scheduler.betas, args)
 
     ### scheduler set timesteps
     if args.generation_mode == 't2i':
@@ -285,14 +285,14 @@ def main():
             # Stack all images together
             latents = torch.cat(images, dim=0)
             if not rgb_as_latents:
-                latents = 0.18215 * vae.encode(latents).latent_dist.sample()
+                latents = vae.config.scaling_factor * vae.encode(latents).latent_dist.sample()
         else:
             if rgb_as_latents:
                 latents = F.interpolate(particles, (64, 64), mode="bilinear", align_corners=False)
             else:
                 rgb_BCHW_512 = F.interpolate(particles, (512, 512), mode="bilinear", align_corners=False)
                 # encode image into latents with vae
-                latents = 0.18215 * vae.encode(rgb_BCHW_512).latent_dist.sample()
+                latents = vae.config.scaling_factor * vae.encode(rgb_BCHW_512).latent_dist.sample()
         return latents
 
     #######################################################################################
@@ -327,7 +327,7 @@ def main():
     first_iteration = True
     logger.info("################# Metrics: ####################")
     ######## t schedule #########
-    chosen_ts = get_t_schedule(num_train_timesteps, args, loss_weight)
+    chosen_ts = get_t_schedule(num_train_timesteps, args, loss_weights)
     pbar = tqdm(chosen_ts)
     ### regular sd text to image generation
     if args.generation_mode == 't2i':
@@ -361,7 +361,7 @@ def main():
             if args.log_steps and (step % args.log_steps == 0 or step == (args.num_steps-1)):
                 # save current img_tensor
                 # scale and decode the image latents with vae
-                tmp_latents = 1 / 0.18215 * latents.clone().detach()
+                tmp_latents = 1 / vae.config.scaling_factor * latents.clone().detach()
                 if args.save_x0:
                     # compute the predicted clean sample x_0
                     pred_latents = scheduler.step(noise_pred, t, latent_noisy).pred_original_sample.to(dtype).clone().detach()
@@ -372,7 +372,7 @@ def main():
                     if args.save_x0:
                         if args.half_inference:
                             pred_latents = pred_latents.half()
-                        image_x0 = vae.decode(pred_latents / 0.18215).sample.to(torch.float32)
+                        image_x0 = vae.decode(pred_latents / vae.config.scaling_factor).sample.to(torch.float32)
                         image = torch.cat((image_,image_x0), dim=2)
                 if args.log_progress:
                     image_progress.append((image/2+0.5).clamp(0, 1))
@@ -395,16 +395,20 @@ def main():
             # predict x0 use ddim sampling
             # z0_latents = predict_x0_diffuser(unet, scheduler, noisy_latents, text_embeddings, t, guidance_scale=args.guidance_scale)
             # loss step
-            loss, noise_pred, noise_pred_phi = sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings_vsd, t, \
+            grad_, noise_pred, noise_pred_phi = sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings_vsd, t, \
                                                     guidance_scale=args.guidance_scale, unet_phi=unet_phi, \
                                                         generation_mode=args.generation_mode, phi_model=args.phi_model, \
                                                             cross_attention_kwargs=cross_attention_kwargs, \
                                                                 multisteps=args.multisteps, scheduler=scheduler, lora_v=args.lora_vprediction, \
-                                                                    half_inference=args.half_inference,
+                                                                    half_inference=args.half_inference, \
                                                                         cfg_phi=args.cfg_phi, grad_scale=args.grad_scale)
             ## weighting
-            loss *= loss_weight[int(t)]
-            ## Compute gradients
+            grad_ *= loss_weights[int(t)]
+            # ref: https://github.com/threestudio-project/threestudio/blob/5e29759db7762ec86f503f97fe1f71a9153ce5d9/threestudio/models/guidance/stable_diffusion_guidance.py#L427
+            # construct loss
+            target = (latents_vsd - grad_).detach()
+            # d(loss)/d(latents) = latents - target = latents - (latents - grad) = grad
+            loss = 0.5 * F.mse_loss(latents_vsd, target, reduction="mean") / args.batch_size
             loss.backward()
             optimizer.step()
             if args.use_scheduler:
@@ -443,7 +447,7 @@ def main():
                 log_steps.append(step)
                 # save current img_tensor
                 # scale and decode the image latents with vae
-                tmp_latents = 1 / 0.18215 * latents_vsd.clone().detach()
+                tmp_latents = 1 / vae.config.scaling_factor * latents_vsd.clone().detach()
                 if args.save_x0:
                     # compute the predicted clean sample x_0
                     pred_latents = scheduler.step(noise_pred, t, noisy_latents).pred_original_sample.to(dtype).clone().detach()
@@ -456,9 +460,9 @@ def main():
                     if args.save_x0:
                         if args.half_inference:
                             pred_latents = pred_latents.half()
-                        image_x0 = vae.decode(pred_latents / 0.18215).sample.to(torch.float32)
+                        image_x0 = vae.decode(pred_latents / vae.config.scaling_factor).sample.to(torch.float32)
                         if args.generation_mode == 'vsd':
-                            image_x0_phi = vae_phi.decode(pred_latents_phi / 0.18215).sample.to(torch.float32)
+                            image_x0_phi = vae_phi.decode(pred_latents_phi / vae.config.scaling_factor).sample.to(torch.float32)
                             image = torch.cat((image_,image_x0,image_x0_phi), dim=2)
                         else:
                             image = torch.cat((image_,image_x0), dim=2)
@@ -483,7 +487,7 @@ def main():
         # get latent of all particles
         latents = get_latents(particles, args.rgb_as_latents, use_mlp_particle=args.use_mlp_particle)
     # scale and decode the image latents with vae
-    latents = 1 / 0.18215 * latents.clone()
+    latents = 1 / vae.config.scaling_factor * latents.clone()
     torch.cuda.empty_cache()
     if args.generation_mode == 't2i':
         image = image_
