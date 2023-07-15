@@ -7,6 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torchvision.utils import save_image
+from torchvision import io
 from tqdm import tqdm
 from datetime import datetime
 import random
@@ -59,6 +60,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--save_phi_model', type=str2bool, default=False, help='save save_phi_model, lora or simple unet')
     parser.add_argument('--load_phi_model_path', type=str, default='', help='phi_model_path to load')
     parser.add_argument('--use_mlp_particle', type=str2bool, default=False, help='use_mlp_particle as representation')
+    parser.add_argument('--init_img_path', type=str, default='', help='init particle from a known image path')
     ### sampling
     parser.add_argument('--num_steps', type=int, default=1000, help='Number of steps for random sampling')
     parser.add_argument('--t_end', type=int, default=980, help='largest possible timestep for random sampling')
@@ -99,6 +101,8 @@ def get_parser(**parser_kwargs):
     assert args.phi_model in ['lora', 'unet_simple']
     if args.half_inference:
         assert args.generation_mode in ['t2i', 'sds'], "half precision doesnot support vsd"
+    if args.init_img_path:
+        assert args.batch_size == 1
     # for sds and t2i, use only args.batch_size
     if args.generation_mode in ['t2i', 'sds']:
         args.particle_num_vsd = args.batch_size
@@ -255,15 +259,24 @@ def main():
         out_features = 4 if args.rgb_as_latents else 3
         particles = nn.ModuleList([Siren(2, hidden_features=256, hidden_layers=3, out_features=out_features, device=device) for _ in range(args.batch_size)])
     else:
-        if args.rgb_as_latents:
-            particles = torch.randn((args.batch_size, unet.config.in_channels, args.height // 8, args.width // 8))
+        if args.init_img_path:
+            # load image
+            init_image = io.read_image(args.init_img_path).unsqueeze(0) / 255
+            init_image = init_image * 2 - 1   #[-1,1]
+            if args.rgb_as_latents:
+                particles = vae.config.scaling_factor * vae.encode(init_image.to(device)).latent_dist.sample()
+            else:
+                particles = init_image.to(device)
         else:
-            # gaussian in rgb space --> strange artifacts
-            particles = torch.randn((args.batch_size, 3, args.height, args.width))
-            args.lr = args.lr * 1   # need larger lr for rgb particles
-            # ## gaussian in latent space --> not better
-            # particles = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8)).to(device, dtype=dtype)
-            # particles = vae.decode(particles).sample
+            if args.rgb_as_latents:
+                particles = torch.randn((args.batch_size, unet.config.in_channels, args.height // 8, args.width // 8))
+            else:
+                # gaussian in rgb space --> strange artifacts
+                particles = torch.randn((args.batch_size, 3, args.height, args.width))
+                args.lr = args.lr * 1   # need larger lr for rgb particles
+                # ## gaussian in latent space --> not better
+                # particles = torch.randn((args.batch_size, unet.in_channels, args.height // 8, args.width // 8)).to(device, dtype=dtype)
+                # particles = vae.decode(particles).sample
     particles = particles.to(device, dtype=dtype)
     if args.nerf_init and args.rgb_as_latents and not args.use_mlp_particle:
         # current only support sds and experimental for only rgb_as_latents==True
