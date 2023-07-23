@@ -46,3 +46,13 @@ python prolific_dreamer2d.py \
 #         --height 512 --width 512 --batch_size 1 --guidance_scale 7.5 \
 #         --log_progress true --save_x0 true \
 #         --half_inference true
+
+# ### DreamTime
+# python prolific_dreamer2d.py \
+#         --num_steps 500 --log_steps 50 --lr 0.03 \
+#         --model_path 'stabilityai/stable-diffusion-2-1-base' \
+#         --loss_weight 'dreamtime' \
+#         --t_schedule dreamtime --generation_mode 'sds' \
+#         --prompt "a photograph of an astronaut riding a horse" \
+#         --height 512 --width 512 --batch_size 1 --guidance_scale 100 \
+#         --log_progress true --save_x0 true \

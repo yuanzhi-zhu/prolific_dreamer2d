@@ -115,14 +115,15 @@ def get_loss_weights(betas, args):
         if args.loss_weight_type == None or args.loss_weight_type == 'none':
             return 1
         elif 'SNR' in args.loss_weight_type:
+            ## ref: https://arxiv.org/abs/2305.04391
             if args.loss_weight_type == 'SNR':
                 return 1 / SNRs[t]
             elif args.loss_weight_type == 'SNR_sqrt':
-                return np.sqrt(1 / SNRs[t])
+                return torch.sqrt(1 / SNRs[t])
             elif args.loss_weight_type == 'SNR_square':
                 return (1 / SNRs[t])**2
             elif args.loss_weight_type == 'SNR_log1p':
-                return np.log(1 + 1 / SNRs[t])
+                return torch.log(1 + 1 / SNRs[t])
         elif args.loss_weight_type == 'rhos':
             return 1 / rhos[t]
         elif 'alpha' in args.loss_weight_type:
@@ -250,6 +251,7 @@ def sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings, t, unet_p
     if generation_mode == 'sds':
         # SDS
         grad = grad_scale * (noise_pred - noise)
+        # grad = grad_scale * (noise_pred)  # SJC
         noise_pred_phi = noise
     elif generation_mode == 'vsd':
         with torch.no_grad():

@@ -226,6 +226,7 @@ def main():
             vae_phi = vae
     elif args.generation_mode == 'sds':
         unet_phi = None
+        vae_phi = vae
     
     ### get text embedding
     text_input = tokenizer([args.prompt] * max(args.particle_num_vsd,args.particle_num_phi), padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
@@ -480,7 +481,7 @@ def main():
                         else:
                             image = torch.cat((image_,image_x0), dim=2)
                 if args.log_progress:
-                    image_progress.append((image_/2+0.5).clamp(0, 1))
+                    image_progress.append((torch.cat((image_,image_x0), dim=2)/2+0.5).clamp(0, 1))
                 save_image((image/2+0.5).clamp(0, 1), f'{args.work_dir}/{image_name}_image_step{step}_t{t.item()}.png')
                 ave_train_loss_value = np.average(train_loss_values)
                 ave_train_loss_values.append(ave_train_loss_value) if step > 0 else None
