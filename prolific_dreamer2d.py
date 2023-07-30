@@ -11,6 +11,8 @@ from torchvision import io
 from tqdm import tqdm
 from datetime import datetime
 import random
+import imageio
+from pathlib import Path
 from model_utils import (
             get_t_schedule, 
             get_loss_weights, 
@@ -50,6 +52,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--seed', default=1024, type=int, help='global seed')
     parser.add_argument('--log_steps', type=int, default=50, help='Log steps')
     parser.add_argument('--log_progress', type=str2bool, default=False, help='Log progress')
+    parser.add_argument('--log_gif', type=str2bool, default=False, help='Log gif')
     parser.add_argument('--model_path', type=str, default='CompVis/stable-diffusion-v1-4', help='Path to the model')
     current_datetime = datetime.now()
     parser.add_argument('--run_date', type=str, default=current_datetime.strftime("%Y%m%d"), help='Run date')
@@ -494,6 +497,11 @@ def main():
                 logger.info(f'global free and total GPU memory: {round(global_free/1024**3,6)} GB, {round(total_gpu/1024**3,6)} GB')
                 first_iteration = False
 
+    if args.log_gif:
+        # make gif
+        images = sorted(Path(args.work_dir).glob(f"*{image_name}*.png"))
+        images = [imageio.imread(image) for image in images]
+        imageio.mimsave(f'{args.work_dir}/{image_name}.gif', images, duration=0.3)
     if args.log_progress and args.batch_size == 1:
         concatenated_images = torch.cat(image_progress, dim=0)
         save_image(concatenated_images, f'{args.work_dir}/{image_name}_prgressive.png')
@@ -509,7 +517,14 @@ def main():
         with torch.no_grad():
             if args.half_inference:
                 latents = latents.half()
-            image = vae.decode(latents).sample.to(torch.float32)
+            bs = 8  # avoid OOM for too many particles
+            maximum_display = 32
+            images = []
+            for i in range(int(np.ceil(min(latents.shape[0],maximum_display) / bs))):
+                batch_i = latents[i*bs:(i+1)*bs]
+                image_i = vae.decode(batch_i).sample.to(torch.float32)
+                images.append(image_i)
+            image = torch.cat(images, dim=0)
     save_image((image/2+0.5).clamp(0, 1), f'{args.work_dir}/final_image_{image_name}.png')
 
     if args.generation_mode in ['vsd'] and args.save_phi_model:
