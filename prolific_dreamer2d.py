@@ -483,6 +483,8 @@ def main():
                             image = torch.cat((image_,image_x0,image_x0_phi), dim=2)
                         else:
                             image = torch.cat((image_,image_x0), dim=2)
+                    else:
+                        image = image_
                 if args.log_progress:
                     image_progress.append((torch.cat((image_,image_x0), dim=2)/2+0.5).clamp(0, 1))
                 save_image((image/2+0.5).clamp(0, 1), f'{args.work_dir}/{image_name}_image_step{step}_t{t.item()}.png')
