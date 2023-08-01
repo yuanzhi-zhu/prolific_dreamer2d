@@ -8,7 +8,12 @@ Feel free to try the colab notebook https://github.com/yuanzhi-zhu/prolific_drea
 
 <p align="center">
   <img src="figs/illustration.png" width="900px"/><br/>
-  <em>Progress of generation with VSD sampling (CFG=7.5)</em>
+  <em>Progress of generation with VSD sampling (1 particle, CFG=7.5)</em>
+</p>
+
+<p align="center">
+  <img src="figs/16particles.png" width="900px"/><br/>
+  <em>Final results of 16 particles (VSD)</em>
 </p>
 
 <p align="center">
