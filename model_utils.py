@@ -255,7 +255,7 @@ def sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings, t, unet_p
         noise_pred_phi = noise
     elif generation_mode == 'vsd':
         with torch.no_grad():
-            noise_pred_phi = predict_noise0_diffuser(unet_phi, noisy_latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=lora_v)
+            noise_pred_phi = predict_noise0_diffuser(unet_phi, noisy_latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=lora_v, half_inference=half_inference)
         # VSD
         grad = grad_scale * (noise_pred - noise_pred_phi.detach())
 
@@ -264,12 +264,12 @@ def sds_vsd_grad_diffuser(unet, noisy_latents, noise, text_embeddings, t, unet_p
     ## return grad
     return grad, noise_pred.detach().clone(), noise_pred_phi.detach().clone()
 
-def phi_vsd_grad_diffuser(unet_phi, latents, noise, text_embeddings, t, cfg_phi=1., grad_scale=1, cross_attention_kwargs={}, scheduler=None, lora_v=False):
+def phi_vsd_grad_diffuser(unet_phi, latents, noise, text_embeddings, t, cfg_phi=1., grad_scale=1, cross_attention_kwargs={}, scheduler=None, lora_v=False, half_inference=False):
     loss_fn = nn.MSELoss()
     # ref to https://github.com/ashawkey/stable-dreamfusion/blob/main/guidance/sd_utils.py#L114
     # predict the noise residual with unet
     clean_latents = scheduler.step(noise, t, latents).pred_original_sample
-    noise_pred = predict_noise0_diffuser(unet_phi, latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler)
+    noise_pred = predict_noise0_diffuser(unet_phi, latents, text_embeddings, t, guidance_scale=cfg_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, half_inference=half_inference)
     if lora_v:
         target = scheduler.get_velocity(clean_latents.detach(), noise, t)
     else:

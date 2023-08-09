@@ -90,3 +90,5 @@ python prolific_dreamer2d.py \
 **rgb_as_latents**: initialize particles in latent space
 
 **use_mlp_particle**: use siren mlp as the 2d representation of image
+
+**half_inference**: half-precision inference, requires under 6 GB GPU memory, is faster but has worse performance on vsd

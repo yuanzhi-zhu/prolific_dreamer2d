@@ -102,8 +102,6 @@ def get_parser(**parser_kwargs):
     os.makedirs(args.work_dir, exist_ok=True)
     assert args.generation_mode in ['t2i', 'sds', 'vsd']
     assert args.phi_model in ['lora', 'unet_simple']
-    if args.half_inference:
-        assert args.generation_mode in ['t2i', 'sds'], "half precision doesnot support vsd"
     if args.init_img_path:
         assert args.batch_size == 1
     # for sds and t2i, use only args.batch_size
@@ -449,7 +447,9 @@ def main():
                     latents_phi = latents[indices[:args.particle_num_phi]]
                     noise_phi = torch.randn_like(latents_phi)
                     noisy_latents_phi = scheduler.add_noise(latents_phi, noise_phi, t_phi)
-                    loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings_phi, t_phi, cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, lora_v=args.lora_vprediction)
+                    loss_phi = phi_vsd_grad_diffuser(unet_phi, noisy_latents_phi.detach(), noise_phi, text_embeddings_phi, t_phi, \
+                                                     cross_attention_kwargs=cross_attention_kwargs, scheduler=scheduler, \
+                                                        lora_v=args.lora_vprediction, half_inference=args.half_inference)
                     loss_phi.backward()
                     phi_optimizer.step()
 
@@ -479,6 +479,8 @@ def main():
                             pred_latents = pred_latents.half()
                         image_x0 = vae.decode(pred_latents / vae.config.scaling_factor).sample.to(torch.float32)
                         if args.generation_mode == 'vsd':
+                            if args.half_inference:
+                                pred_latents_phi = pred_latents_phi.half()
                             image_x0_phi = vae_phi.decode(pred_latents_phi / vae.config.scaling_factor).sample.to(torch.float32)
                             image = torch.cat((image_,image_x0,image_x0_phi), dim=2)
                         else:
