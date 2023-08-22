@@ -389,6 +389,8 @@ def main():
                             pred_latents = pred_latents.half()
                         image_x0 = vae.decode(pred_latents / vae.config.scaling_factor).sample.to(torch.float32)
                         image = torch.cat((image_,image_x0), dim=2)
+                    else:
+                        image = image_
                 if args.log_progress:
                     image_progress.append((image/2+0.5).clamp(0, 1))
             step += 1
@@ -488,7 +490,7 @@ def main():
                     else:
                         image = image_
                 if args.log_progress:
-                    image_progress.append((torch.cat((image_,image_x0), dim=2)/2+0.5).clamp(0, 1))
+                    image_progress.append((image/2+0.5).clamp(0, 1))
                 save_image((image/2+0.5).clamp(0, 1), f'{args.work_dir}/{image_name}_image_step{step}_t{t.item()}.png')
                 ave_train_loss_value = np.average(train_loss_values)
                 ave_train_loss_values.append(ave_train_loss_value) if step > 0 else None

@@ -75,9 +75,9 @@ python prolific_dreamer2d.py \
 
 **use_t_phi**: use different t to train phi model
 
-**loss_weight**: which weight to use for SDS/VSD loss, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L111
+**loss_weight**: which weight to use for SDS/VSD loss, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L93
 
-**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L34; by default we use 'random', to use the 2 stage time schedule $U[0.02,0.98] \rightarrow U[0.5,0.98]$ as in the paper, we can use 't_stages2'
+**t_schedule**: generate a sequence of timesteps, see https://github.com/yuanzhi-zhu/prolific_dreamer2d/blob/main/model_utils.py#L16; by default we use 'random', to use the 2 stage time schedule $U[0.02,0.98] \rightarrow U[0.5,0.98]$ as in the paper, we can use 't_stages2'
 
 **lora_vprediction**: use v-prediction for lora model training
 

@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from torch.cuda.amp import custom_bwd, custom_fwd
 import numpy as np
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
