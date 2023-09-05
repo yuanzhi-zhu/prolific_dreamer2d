@@ -20,8 +20,10 @@ from model_utils import (
             phi_vsd_grad_diffuser, 
             extract_lora_diffusers,
             predict_noise0_diffuser,
-            update_curve
-)
+            update_curve,
+            get_images,
+            get_latents,
+            )
 import shutil
 import logging
 
@@ -256,8 +258,8 @@ def main():
     if args.use_mlp_particle:
         # use siren network
         from model_utils import Siren
-        print(f'for mlp_particle, set lr to 1e-4')
         args.lr = 1e-4
+        print(f'for mlp_particle, set lr to {args.lr}')
         out_features = 4 if args.rgb_as_latents else 3
         particles = nn.ModuleList([Siren(2, hidden_features=256, hidden_layers=3, out_features=out_features, device=device) for _ in range(args.batch_size)])
     else:
@@ -287,29 +289,6 @@ def main():
             noise_pred = predict_noise0_diffuser(unet, particles, text_embeddings_vsd, t=999, guidance_scale=7.5, scheduler=scheduler)
         particles = scheduler.step(noise_pred, 999, particles).pred_original_sample
     # latents = latents * scheduler.init_noise_sigma
-    
-    def get_latents(particles, rgb_as_latents=False, use_mlp_particle=False):
-        ### get latents from particles
-        if use_mlp_particle:
-            images = []
-            output_size = args.height // 8 if rgb_as_latents else args.height
-            # Loop over all MLPs and generate an image for each
-            for particle_mlp in particles:
-                image = particle_mlp.generate_image(output_size)
-                images.append(image)
-            # Stack all images together
-            latents = torch.cat(images, dim=0)
-            if not rgb_as_latents:
-                latents = vae.config.scaling_factor * vae.encode(latents).latent_dist.sample()
-        else:
-            if rgb_as_latents:
-                latents = F.interpolate(particles, (64, 64), mode="bilinear", align_corners=False)
-            else:
-                rgb_BCHW_512 = F.interpolate(particles, (512, 512), mode="bilinear", align_corners=False)
-                # encode image into latents with vae
-                latents = vae.config.scaling_factor * vae.encode(rgb_BCHW_512).latent_dist.sample()
-        return latents
-
     #######################################################################################
     ### configure optimizer and loss function
     if args.use_mlp_particle:
@@ -355,7 +334,7 @@ def main():
         step = 0
         # get latent of all particles
         assert args.use_mlp_particle == False
-        latents = get_latents(particles, args.rgb_as_latents)
+        latents = get_latents(particles, vae, args.rgb_as_latents)
         if args.half_inference:
             latents = latents.half()
             text_embeddings_vsd = text_embeddings_vsd.half()
@@ -399,7 +378,7 @@ def main():
         cross_attention_kwargs = {'scale': args.lora_scale} if (args.generation_mode == 'vsd' and args.phi_model == 'lora') else {}
         for step, chosen_t in enumerate(pbar):
             # get latent of all particles
-            latents = get_latents(particles, args.rgb_as_latents, use_mlp_particle=args.use_mlp_particle)
+            latents = get_latents(particles, vae, args.rgb_as_latents, use_mlp_particle=args.use_mlp_particle)
             t = torch.tensor([chosen_t]).to(device)
             ######## q sample #########
             # random sample particle_num_vsd particles from latents
@@ -511,27 +490,16 @@ def main():
     if args.log_progress and args.batch_size == 1:
         concatenated_images = torch.cat(image_progress, dim=0)
         save_image(concatenated_images, f'{args.work_dir}/{image_name}_prgressive.png')
-    with torch.no_grad():
-        # get latent of all particles
-        latents = get_latents(particles, args.rgb_as_latents, use_mlp_particle=args.use_mlp_particle)
-    # scale and decode the image latents with vae
-    latents = 1 / vae.config.scaling_factor * latents.clone()
-    torch.cuda.empty_cache()
+    # save final image
     if args.generation_mode == 't2i':
         image = image_
     else:
-        with torch.no_grad():
-            if args.half_inference:
-                latents = latents.half()
-            bs = 8  # avoid OOM for too many particles
-            maximum_display = 32
-            images = []
-            for i in range(int(np.ceil(min(latents.shape[0],maximum_display) / bs))):
-                batch_i = latents[i*bs:(i+1)*bs]
-                image_i = vae.decode(batch_i).sample.to(torch.float32)
-                images.append(image_i)
-            image = torch.cat(images, dim=0)
+        image = get_images(particles, vae, args.rgb_as_latents, use_mlp_particle=args.use_mlp_particle)
     save_image((image/2+0.5).clamp(0, 1), f'{args.work_dir}/final_image_{image_name}.png')
+    # through vae will get image with less artifacts for image particles
+    # from model_utils import batch_decode_vae
+    # images = batch_decode_vae(latents, vae)
+    # save_image((images/2+0.5).clamp(0, 1), f'{args.work_dir}/final_image_2_{image_name}.png')
 
     if args.generation_mode in ['vsd'] and args.save_phi_model:
         if args.phi_model in ['lora']:

@@ -3,6 +3,7 @@ from torch import nn
 import numpy as np
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 from diffusers.models.attention_processor import (
     AttnAddedKVProcessor,
@@ -328,6 +329,65 @@ def update_curve(values, label, x_label, y_label, model_path, run_id, log_steps=
     plt.close()
 
 
+def get_latents(particles, vae, rgb_as_latents=False, use_mlp_particle=False):
+    ### get latents from particles
+    if use_mlp_particle:
+        images = []
+        output_size = 64 if rgb_as_latents else 512
+        # Loop over all MLPs and generate an image for each
+        for particle_mlp in particles:
+            image = particle_mlp.generate_image(output_size)
+            images.append(image)
+        # Stack all images together
+        latents = torch.cat(images, dim=0)
+        if not rgb_as_latents:
+            latents = vae.config.scaling_factor * vae.encode(latents).latent_dist.sample()
+    else:
+        if rgb_as_latents:
+            latents = F.interpolate(particles, (64, 64), mode="bilinear", align_corners=False)
+        else:
+            rgb_BCHW_512 = F.interpolate(particles, (512, 512), mode="bilinear", align_corners=False)
+            # encode image into latents with vae
+            latents = vae.config.scaling_factor * vae.encode(rgb_BCHW_512).latent_dist.sample()
+    return latents
+
+
+@torch.no_grad()
+def batch_decode_vae(latents, vae):
+    latents = 1 / vae.config.scaling_factor * latents.clone().detach()
+    bs = 8  # avoid OOM for too many particles
+    images = []
+    for i in range(int(np.ceil(latents.shape[0] / bs))):
+        batch_i = latents[i*bs:(i+1)*bs]
+        image_i = vae.decode(batch_i).sample.to(torch.float32)
+        images.append(image_i)
+    image = torch.cat(images, dim=0)
+    return image
+
+
+@torch.no_grad()
+def get_images(particles, vae, rgb_as_latents=False, use_mlp_particle=False):
+    ### get images from particles
+    if use_mlp_particle:
+        images = []
+        output_size = 64 if rgb_as_latents else 512
+        # Loop over all MLPs and generate an image for each
+        for particle_mlp in particles:
+            image = particle_mlp.generate_image(output_size)
+            images.append(image)
+        # Stack all images together
+        images = torch.cat(images, dim=0)
+        if rgb_as_latents:
+            images = batch_decode_vae(images, vae)
+    else:
+        if rgb_as_latents:
+            latents = F.interpolate(particles, (64, 64), mode="bilinear", align_corners=False)
+            images = batch_decode_vae(latents, vae)
+        else:
+            images = F.interpolate(particles, (512, 512), mode="bilinear", align_corners=False)
+    return images
+
+
 ### siren from https://github.com/vsitzmann/siren/
 class SineLayer(nn.Module):
     # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of omega_0.
@@ -374,8 +434,9 @@ class Siren(nn.Module):
         if outermost_linear:
             final_linear = nn.Linear(hidden_features, out_features)
             with torch.no_grad():
-                final_linear.weight.uniform_(-np.sqrt(6 / hidden_features) / hidden_omega_0, 
-                                              np.sqrt(6 / hidden_features) / hidden_omega_0)
+                # final_linear.weight.uniform_(-np.sqrt(6 / hidden_features) / hidden_omega_0, 
+                #                               np.sqrt(6 / hidden_features) / hidden_omega_0)
+                final_linear.weight.normal_(0, 1 / hidden_features)
             self.net.append(final_linear)
         else:
             self.net.append(SineLayer(hidden_features, out_features, 
