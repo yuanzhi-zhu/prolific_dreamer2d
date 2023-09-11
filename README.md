@@ -21,7 +21,11 @@ Feel free to try the colab notebook https://github.com/yuanzhi-zhu/prolific_drea
   <em>Comparison between SDS, VSD and Text2Image with different CFG</em>
 </p>
 
+## TODO List
+- [ ] make mlp particle work
+- [ ] make DeepFloyd IF (SDS & VSD) work
 
+## Commands to Reproduce Results
 #### VSD command line
 ```python
 python prolific_dreamer2d.py \
