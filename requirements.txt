@@ -10,6 +10,8 @@ tokenizers==0.13.3
 tqdm==4.65.0
 transformers==4.29.2
 urllib3==1.26.6
+imageio==2.31.3
+scipy==1.10.1
 --extra-index-url https://download.pytorch.org/whl/cu117
 torch==1.13.1+cu117
 torchaudio==0.13.1+cu117
