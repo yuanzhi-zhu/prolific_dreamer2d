@@ -23,6 +23,7 @@ from model_utils import (
             update_curve,
             get_images,
             get_latents,
+            get_optimizer,
             )
 import shutil
 import logging
@@ -83,7 +84,10 @@ def get_parser(**parser_kwargs):
     parser.add_argument('--guidance_scale', default=7.5, type=float, help='Scale for classifier-free guidance')
     parser.add_argument('--cfg_phi', default=1., type=float, help='Scale for classifier-free guidance of phi model')
     ### optimizing
+    parser.add_argument('--optimizer', type=str, default='adam', help='Optimizer')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
+    parser.add_argument('--betas', type=tuple, default=(0.9, 0.999), help='Betas for Adam optimizer')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay for Adam optimizer')
     parser.add_argument('--phi_lr', type=float, default=0.0001, help='Learning rate for phi model')
     parser.add_argument('--phi_model', type=str, default='lora', help='models servered as epsilon_phi')
     parser.add_argument('--use_t_phi', type=str2bool, default=False, help='use different t for phi finetuning')
@@ -306,7 +310,7 @@ def main():
         if args.phi_model in ['lora', 'unet_simple']:
             phi_optimizer = torch.optim.AdamW([{"params": phi_params, "lr": args.phi_lr}], lr=args.phi_lr)
             print(f'number of trainable parameters of phi model in optimizer: {sum(p.numel() for p in phi_params if p.requires_grad)}')
-    optimizer = torch.optim.Adam(particles_to_optimize, lr=args.lr)
+    optimizer = get_optimizer(particles_to_optimize, args)
     if args.use_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, \
             start_factor=args.lr_scheduler_start_factor, total_iters=args.lr_scheduler_iters)
