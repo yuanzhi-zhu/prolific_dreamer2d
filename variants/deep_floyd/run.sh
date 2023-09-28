@@ -23,9 +23,19 @@ python prolific_dreamer2d.py \
         --loss_weight '1m_alphas_cumprod' \
         --t_schedule random --generation_mode 'sds' \
         --prompt "a photograph of an astronaut riding a horse" \
-        --height 64 --width 64 --batch_size 1 --guidance_scale 100 \
+        --height 64 --width 64 --batch_size 1 --guidance_scale 7.5 \
         --log_progress true --save_x0 true \
         # --use_mlp_particle true \
+        # --half_inference true
+
+### T2I pipeline
+python prolific_dreamer2d.py \
+        --num_steps 100 --log_steps 20 --seed 42 \
+        --model_path 'DeepFloyd/IF-I-M-v1.0' \
+        --generation_mode 't2i_pipeline' \
+        --prompt 'a photograph of an astronaut riding a horse' \
+        --height 64 --width 64 --batch_size 1 --guidance_scale 7.5 \
+        --log_progress false --save_x0 true \
         # --half_inference true
 
 ### T2I

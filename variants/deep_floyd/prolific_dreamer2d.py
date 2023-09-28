@@ -95,12 +95,12 @@ def get_parser(**parser_kwargs):
     args.work_dir = f'{args.work_dir}_{args.run_id}_{args.generation_mode}_cfg_{args.guidance_scale}_bs_{args.batch_size}_num_steps_{args.num_steps}_tschedule_{args.t_schedule}'
     args.work_dir = args.work_dir + f'_{args.phi_model}' if args.generation_mode == 'vsd' else args.work_dir
     os.makedirs(args.work_dir, exist_ok=True)
-    assert args.generation_mode in ['t2i', 'sds', 'vsd']
+    assert args.generation_mode in ['t2i', 'sds', 'vsd', 't2i_pipeline']
     assert args.phi_model in ['lora', 'unet_simple']
     if args.init_img_path:
         assert args.batch_size == 1
     # for sds and t2i, use only args.batch_size
-    if args.generation_mode in ['t2i', 'sds']:
+    if args.generation_mode in ['t2i', 'sds', 't2i_pipeline']:
         args.particle_num_vsd = args.batch_size
         args.particle_num_phi = args.batch_size
     assert (args.batch_size >= args.particle_num_vsd) and (args.batch_size >= args.particle_num_phi)
@@ -146,8 +146,6 @@ def main():
     ### load model
     logger.info(f'load models from path: {args.model_path}')
     df_IF_stage_1 = DiffusionPipeline.from_pretrained(args.model_path, torch_dtype=dtype)
-    tokenizer = df_IF_stage_1.tokenizer
-    text_encoder = df_IF_stage_1.text_encoder
     unet = df_IF_stage_1.unet
     if args.generation_mode == 't2i':
         scheduler = df_IF_stage_1.scheduler
@@ -157,10 +155,7 @@ def main():
 
     if args.half_inference:
         unet = unet.half()
-        text_encoder = text_encoder.half()
     unet = unet.to(device)
-    text_encoder = text_encoder.to(device)
-    text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
     # all variables in same device for scheduler.step()
     scheduler.betas = scheduler.betas.to(device)
@@ -204,15 +199,10 @@ def main():
         unet_phi = None
     
     ### get text embedding
-    text_input = tokenizer([args.prompt] * max(args.particle_num_vsd,args.particle_num_phi), padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
-    with torch.no_grad():
-        text_embeddings = text_encoder(text_input.input_ids.to(device))[0]
-    max_length = text_input.input_ids.shape[-1]
-    uncond_input = tokenizer(
-        [""] * max(args.particle_num_vsd,args.particle_num_phi), padding="max_length", max_length=max_length, return_tensors="pt"
-    )
-    with torch.no_grad():
-        uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
+    # while T5 can handle much longer input sequences than 77, the text encoder was trained with a max length of 77 for IF
+    df_IF_stage_1.text_encoder = df_IF_stage_1.text_encoder.to(device)
+    text_embeddings, uncond_embeddings = df_IF_stage_1.encode_prompt(args.prompt, device=device)
+    
     text_embeddings_vsd = torch.cat([uncond_embeddings[:args.particle_num_vsd], text_embeddings[:args.particle_num_vsd]])
     text_embeddings_phi = torch.cat([uncond_embeddings[:args.particle_num_phi], text_embeddings[:args.particle_num_phi]])
 
@@ -279,8 +269,25 @@ def main():
     ######## t schedule #########
     chosen_ts = get_t_schedule(num_train_timesteps, args, loss_weights)
     pbar = tqdm(chosen_ts)
+    ### regular sd text to image generation using pipeline
+    if args.generation_mode == 't2i_pipeline':
+        assert not args.log_gif and not args.log_progress
+        df_IF_stage_1 = df_IF_stage_1.to(device)
+
+        # text embeds
+        prompt_embeds, negative_embeds = text_embeddings, uncond_embeddings
+
+        # stage 1
+        image_ = df_IF_stage_1(
+                                prompt_embeds=prompt_embeds, \
+                                negative_prompt_embeds=negative_embeds, \
+                                num_inference_steps=args.num_steps, \
+                                guidance_scale=args.guidance_scale, \
+                                output_type="pt"
+        ).images
+        
     ### regular sd text to image generation
-    if args.generation_mode == 't2i':
+    elif args.generation_mode == 't2i':
         if args.phi_model == 'lora' and args.load_phi_model_path:
             ### unet_phi is the same instance as unet that has been modified in-place
             unet_phi, unet_lora_layers = extract_lora_diffusers(unet, device)
@@ -446,7 +453,7 @@ def main():
         concatenated_images = torch.cat(image_progress, dim=0)
         save_image(concatenated_images, f'{args.work_dir}/{image_name}_prgressive.png')
     # save final image
-    if args.generation_mode == 't2i':
+    if 't2i' in args.generation_mode:
         image = image_
     else:
         image = get_images(particles, use_mlp_particle=args.use_mlp_particle)
