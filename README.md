@@ -24,7 +24,7 @@ Feel free to try the colab notebook https://github.com/yuanzhi-zhu/prolific_drea
 ## TODO List
 - [ ] SGD optimizer does not work for sds
 - [ ] make mlp particle work
-- [ ] make DeepFloyd IF (SDS & VSD) work
+- [x] make DeepFloyd IF (SDS & VSD) work
 
 ## Commands to Reproduce Results
 #### VSD command line
@@ -97,3 +97,6 @@ python prolific_dreamer2d.py \
 **use_mlp_particle**: use siren mlp as the 2d representation of image
 
 **half_inference**: half-precision inference, requires under 6 GB GPU memory, is faster but has worse performance on vsd
+
+## why VSD over SDS?
+![image](https://github.com/yuanzhi-zhu/prolific_dreamer2d/assets/24802044/421cad24-1635-48a2-8c07-9a4b0b5c5d37)
