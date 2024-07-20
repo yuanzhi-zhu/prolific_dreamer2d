@@ -87,7 +87,7 @@ def get_parser(**parser_kwargs):
     ### optimizing
     parser.add_argument('--optimizer', type=str, default='adam', help='Optimizer')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
-    parser.add_argument('--betas', type=tuple, default=(0.9, 0.999), help='Betas for Adam optimizer')
+    parser.add_argument('--betas', nargs='+', type=float, default=[0.9, 0.999], help='Betas for Adam optimizer')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay for Adam optimizer')
     parser.add_argument('--phi_lr', type=float, default=0.0001, help='Learning rate for phi model')
     parser.add_argument('--phi_model', type=str, default='lora', help='models servered as epsilon_phi')
@@ -104,7 +104,7 @@ def get_parser(**parser_kwargs):
     args = parser.parse_args()
     # create working directory
     args.run_id = args.run_date + '_' + args.run_time
-    args.work_dir = f'{args.work_dir}_{args.run_id}_{args.generation_mode}_cfg_{args.guidance_scale}_bs_{args.batch_size}_num_steps_{args.num_steps}_tschedule_{args.t_schedule}'
+    args.work_dir = f'{args.work_dir}-{args.run_id}-{args.generation_mode}-lr_{args.lr}-cfg_{args.guidance_scale}-bs_{args.batch_size}-num_steps_{args.num_steps}-tschedule_{args.t_schedule}-loss_weight_{args.loss_weight_type}'
     args.work_dir = args.work_dir + f'_{args.phi_model}' if args.generation_mode == 'vsd' else args.work_dir
     os.makedirs(args.work_dir, exist_ok=True)
     assert args.generation_mode in ['t2i', 'sds', 'vsd']
@@ -137,6 +137,9 @@ class nullcontext:
     
 
 def main():
+    #################################################################################
+    #                                config & logger                                #
+    #################################################################################
     args = get_parser()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.float32 # use float32 by default
@@ -161,8 +164,9 @@ def main():
     for arg in vars(args):
         logger.info(f"\t{arg}: {getattr(args, arg)}")
     
-    #######################################################################################
-    ### load model
+    #################################################################################
+    #                         load model & diffusion scheduler                      #
+    #################################################################################
     logger.info(f'load models from path: {args.model_path}')
     # 1. Load the autoencoder model which will be used to decode the latents into image space. 
     vae = AutoencoderKL.from_pretrained(args.model_path, subfolder="vae", torch_dtype=dtype)
@@ -236,6 +240,16 @@ def main():
         unet_phi = None
         vae_phi = vae
     
+    ### scheduler set timesteps
+    num_train_timesteps = len(scheduler.betas)
+    if args.generation_mode == 't2i':
+        scheduler.set_timesteps(args.num_steps)
+    else:
+        scheduler.set_timesteps(num_train_timesteps)
+
+    #################################################################################
+    #                       initialize particles and text emb                       #
+    #################################################################################
     ### get text embedding
     text_input = tokenizer([args.prompt] * max(args.particle_num_vsd,args.particle_num_phi), padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
     with torch.no_grad():
@@ -248,18 +262,7 @@ def main():
         uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
     text_embeddings_vsd = torch.cat([uncond_embeddings[:args.particle_num_vsd], text_embeddings[:args.particle_num_vsd]])
     text_embeddings_phi = torch.cat([uncond_embeddings[:args.particle_num_phi], text_embeddings[:args.particle_num_phi]])
-
-    ### weight loss
-    num_train_timesteps = len(scheduler.betas)
-    loss_weights = get_loss_weights(scheduler.betas, args)
-
-    ### scheduler set timesteps
-    if args.generation_mode == 't2i':
-        scheduler.set_timesteps(args.num_steps)
-    else:
-        scheduler.set_timesteps(num_train_timesteps)
-
-    ### initialize particles
+    ### init particles
     if args.use_mlp_particle:
         # use siren network
         from model_utils import Siren
@@ -293,9 +296,13 @@ def main():
         with torch.no_grad():
             noise_pred = predict_noise0_diffuser(unet, particles, text_embeddings_vsd, t=999, guidance_scale=7.5, scheduler=scheduler)
         particles = scheduler.step(noise_pred, 999, particles).pred_original_sample
-    # latents = latents * scheduler.init_noise_sigma
-    #######################################################################################
-    ### configure optimizer and loss function
+
+    #################################################################################
+    #                           optimizer & lr schedule                             #
+    #################################################################################
+    ### weight loss
+    loss_weights = get_loss_weights(scheduler.betas, args)
+    ### optimizer
     if args.use_mlp_particle:
         # For a list of models, we want to optimize their parameters
         particles_to_optimize = [param for mlp in particles for param in mlp.parameters() if param.requires_grad]
@@ -312,12 +319,16 @@ def main():
             phi_optimizer = torch.optim.AdamW([{"params": phi_params, "lr": args.phi_lr}], lr=args.phi_lr)
             print(f'number of trainable parameters of phi model in optimizer: {sum(p.numel() for p in phi_params if p.requires_grad)}')
     optimizer = get_optimizer(particles_to_optimize, args)
+    ### lr_scheduler
     if args.use_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, \
             start_factor=args.lr_scheduler_start_factor, total_iters=args.lr_scheduler_iters)
 
-    #######################################################################################
-    ############################# Main optimization loop ##############################
+    #################################################################################
+    #################################################################################
+    #                             Main optimization loop                            #
+    #################################################################################
+    #################################################################################
     log_steps = []
     train_loss_values = []
     ave_train_loss_values = []
@@ -328,6 +339,9 @@ def main():
     ######## t schedule #########
     chosen_ts = get_t_schedule(num_train_timesteps, args, loss_weights)
     pbar = tqdm(chosen_ts)
+    #################################################################################
+    #                                     MODE: T2I                                 #
+    #################################################################################
     ### regular sd text to image generation
     if args.generation_mode == 't2i':
         if args.phi_model == 'lora' and args.load_phi_model_path:
@@ -378,6 +392,10 @@ def main():
                 if args.log_progress:
                     image_progress.append((image/2+0.5).clamp(0, 1))
             step += 1
+
+    #################################################################################
+    #                                 MODE: SDS | VSD                               #
+    #################################################################################
     ### sds text to image generation
     elif args.generation_mode in ['sds', 'vsd']:
         cross_attention_kwargs = {'scale': args.lora_scale} if (args.generation_mode == 'vsd' and args.phi_model == 'lora') else {}
@@ -489,6 +507,10 @@ def main():
                 logger.info(f'global free and total GPU memory: {round(global_free/1024**3,6)} GB, {round(total_gpu/1024**3,6)} GB')
                 first_iteration = False
 
+
+    #################################################################################
+    #                                   save results                                #
+    #################################################################################
     if args.log_gif:
         # make gif
         images = sorted(Path(args.work_dir).glob(f"*{image_name}*.png"))

@@ -142,6 +142,8 @@ def get_loss_weights(betas, args):
                 return 1
             else:
                 return np.exp(-(t - m2)**2 / (2 * s2**2))
+        elif 'BAOAB' in args.loss_weight_type:
+            return 2 * sqrt_1m_alphas_cumprod[t] ** 2 / alphas_cumprod[t]
         else:
             raise NotImplementedError
     weights = []
@@ -340,7 +342,7 @@ def get_optimizer(parameters, config):
         optimizer = torch.optim.RAdam(parameters, lr=config.lr, betas=config.betas, \
                                     weight_decay=config.weight_decay)
     elif config.optimizer == "sgd":
-        optimizer = torch.optim.SGD(parameters, lr=config.lr, betas=config.betas, \
+        optimizer = torch.optim.SGD(parameters, lr=config.lr, momentum=config.betas[0], \
                                     weight_decay=config.weight_decay)
     else:
         raise NotImplementedError(f"Optimizer {config.optimizer} not implemented.")
