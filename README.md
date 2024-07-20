@@ -98,5 +98,5 @@ python prolific_dreamer2d.py \
 
 **half_inference**: half-precision inference, requires under 6 GB GPU memory, is faster but has worse performance on vsd
 
-## why VSD over SDS?
-![image](https://github.com/yuanzhi-zhu/prolific_dreamer2d/assets/24802044/421cad24-1635-48a2-8c07-9a4b0b5c5d37)
+<!-- ## why VSD over SDS?
+![image](https://github.com/yuanzhi-zhu/prolific_dreamer2d/assets/24802044/421cad24-1635-48a2-8c07-9a4b0b5c5d37) -->
